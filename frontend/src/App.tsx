@@ -29,6 +29,8 @@ import {
 import {
   BlockTypeSelect,
   BoldItalicUnderlineToggles,
+  codeBlockPlugin,
+  codeMirrorPlugin,
   CodeToggle,
   CreateLink,
   headingsPlugin,
@@ -1171,6 +1173,29 @@ function RichMarkdownEditor({ content, restoreAssetMarkdown, setContent, uploadA
         if (!url) throw new Error("Upload failed");
         return url;
       }
+    }),
+    codeBlockPlugin(),
+    codeMirrorPlugin({
+      codeBlockLanguages: {
+        "": "Plain text",
+        text: "Plain text",
+        markdown: "Markdown",
+        md: "Markdown",
+        javascript: "JavaScript",
+        js: "JavaScript",
+        typescript: "TypeScript",
+        ts: "TypeScript",
+        go: "Go",
+        bash: "Bash",
+        sh: "Shell",
+        json: "JSON",
+        yaml: "YAML",
+        yml: "YAML",
+        html: "HTML",
+        css: "CSS",
+        sql: "SQL"
+      },
+      autoLoadLanguageSupport: false
     }),
     markdownShortcutPlugin(),
     toolbarPlugin({

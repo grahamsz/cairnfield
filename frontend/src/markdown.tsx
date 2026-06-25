@@ -1,12 +1,41 @@
 import { Fragment } from "react";
 
 export function MarkdownPreview({ source }: { source: string }) {
-  const blocks = source.split(/\n{2,}/);
+  const blocks = parseBlocks(source);
   return (
     <div className="markdown-preview">
       {blocks.map((block, index) => renderBlock(block, index))}
     </div>
   );
+}
+
+function parseBlocks(source: string) {
+  const blocks: string[] = [];
+  const lines = source.split(/\n/);
+  let current: string[] = [];
+  let inFence = false;
+
+  for (const line of lines) {
+    if (line.startsWith("```")) {
+      current.push(line);
+      if (inFence) {
+        blocks.push(current.join("\n"));
+        current = [];
+      }
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence && line.trim() === "") {
+      if (current.length > 0) {
+        blocks.push(current.join("\n"));
+        current = [];
+      }
+      continue;
+    }
+    current.push(line);
+  }
+  if (current.length > 0) blocks.push(current.join("\n"));
+  return blocks;
 }
 
 function renderBlock(block: string, index: number) {
@@ -18,7 +47,7 @@ function renderBlock(block: string, index: number) {
   if (text.startsWith("- ")) {
     return <ul key={index}>{text.split(/\n/).map((line, i) => <li key={i}>{inline(line.replace(/^- /, ""))}</li>)}</ul>;
   }
-  if (/^```/.test(text)) return <pre key={index}><code>{text.replace(/^```\w*\n?/, "").replace(/```$/, "")}</code></pre>;
+  if (/^```/.test(text)) return <pre key={index}><code>{text.replace(/^```[^\n]*\n?/, "").replace(/\n?```$/, "")}</code></pre>;
   return <p key={index}>{inline(text)}</p>;
 }
 

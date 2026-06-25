@@ -757,6 +757,7 @@ func (s *Store) CreateNoteFromTemplate(ctx context.Context, userID, templateID i
 	folder := normalizeFolder(selectedFolder)
 	content := ""
 	createOnce := false
+	templateFolderSpecified := false
 	if templateID > 0 {
 		t, err := scanTemplate(s.db.QueryRowContext(ctx, `SELECT id, user_id, name, title_template, folder_template, body_template, is_default, create_once, created_at, updated_at FROM note_templates WHERE user_id = ? AND id = ? LIMIT 1`, userID, templateID))
 		if err != nil {
@@ -766,6 +767,7 @@ func (s *Store) CreateNoteFromTemplate(ctx context.Context, userID, templateID i
 		folderTemplate := strings.TrimSpace(renderTemplate(t.FolderTemplate, now, 1))
 		if folderTemplate != "" {
 			folder = normalizeFolder(folderTemplate)
+			templateFolderSpecified = true
 		}
 		content = renderTemplate(t.BodyTemplate, now, 1)
 		createOnce = t.CreateOnce
@@ -776,6 +778,13 @@ func (s *Store) CreateNoteFromTemplate(ctx context.Context, userID, templateID i
 	if createOnce {
 		note, version, err := s.GetCurrentNoteByTitle(ctx, userID, title)
 		if err == nil {
+			if templateFolderSpecified && normalizeFolder(note.FolderPath) != folder {
+				movedNote, movedVersion, moveErr := s.MoveNote(ctx, userID, note.ID, folder)
+				if moveErr != nil {
+					return Note{}, NoteVersion{}, false, moveErr
+				}
+				return movedNote, movedVersion, true, nil
+			}
 			return note, version, true, nil
 		}
 		if !errors.Is(err, ErrNotFound) {
