@@ -2405,11 +2405,12 @@ function restoreAssetURLs(markdown: string, assetURLMap: Map<string, string>) {
 
 function contentTypeFromAssetURL(url: string) {
   const clean = url.split("?")[0].toLowerCase();
-  if (clean.endsWith(".png")) return "image/png";
-  if (clean.endsWith(".jpg") || clean.endsWith(".jpeg")) return "image/jpeg";
-  if (clean.endsWith(".gif")) return "image/gif";
-  if (clean.endsWith(".webp")) return "image/webp";
-  if (clean.endsWith(".svg")) return "image/svg+xml";
+  const name = clean.split("/").filter(Boolean).pop() || clean;
+  if (name.endsWith(".png") || name.endsWith("-png")) return "image/png";
+  if (name.endsWith(".jpg") || name.endsWith("-jpg") || name.endsWith(".jpeg") || name.endsWith("-jpeg")) return "image/jpeg";
+  if (name.endsWith(".gif") || name.endsWith("-gif")) return "image/gif";
+  if (name.endsWith(".webp") || name.endsWith("-webp")) return "image/webp";
+  if (name.endsWith(".svg") || name.endsWith("-svg")) return "image/svg+xml";
   return "application/octet-stream";
 }
 

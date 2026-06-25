@@ -1247,7 +1247,7 @@ func urlPathSegment(value string) string {
 	dash := false
 	for _, r := range value {
 		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.':
 			if dash && b.Len() > 0 {
 				b.WriteByte('-')
 			}
