@@ -1,0 +1,9 @@
+node_modules
+frontend/dist
+data
+data.wiped-*
+.agents
+.codex
+.env.cairnfield
+.env.notes
+*.tsbuildinfo

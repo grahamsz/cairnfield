@@ -1,0 +1,29 @@
+{
+  "name": "cairnfield",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "typecheck": "tsc -b --pretty false",
+    "build": "npm run typecheck && vite build --configLoader runner",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@fontsource/fraunces": "^5.2.9",
+    "@mdxeditor/editor": "^4.0.4",
+    "@phosphor-icons/react": "^2.1.10",
+    "@uiw/react-md-editor": "^4.1.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "dompurify": "^3.4.7",
+    "openpgp": "^6.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "sass": "^1.69.5"
+  }
+}
