@@ -969,6 +969,8 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
     };
   }, [activeNote?.id, flushSnapshot]);
 
+  const restoreAssetMarkdown = useCallback((markdown: string) => restoreAssetURLs(markdown, assetURLMapRef.current), []);
+
   useEffect(() => {
     const flushCurrent = () => {
       const noteID = activeNote?.id || 0;
@@ -998,7 +1000,14 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       const encryptedData = await encryptBytes(await file.arrayBuffer(), encryptionKey);
       const encryptedFile = new File([bytesToArrayBuffer(encryptedData)], file.name, { type: "application/octet-stream" });
       const data = await api.uploadAsset(csrf, encryptedFile, activeNote.id, true, file.type || "application/octet-stream");
-      return data.url;
+      const objectURL = URL.createObjectURL(file);
+      const next = new Map(assetURLMapRef.current);
+      const previous = next.get(data.url);
+      if (previous) URL.revokeObjectURL(previous);
+      next.set(data.url, objectURL);
+      assetURLMapRef.current = next;
+      setAssetURLMap(new Map(next));
+      return objectURL;
     }
     const data = await api.uploadAsset(csrf, file, activeNote.id);
     return data.url;
@@ -1124,7 +1133,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
         </div>
       </div>
       {encrypted && !plainUnlocked ? <LockedNoteView openUnlock={openUnlock} /> : null}
-      {plainUnlocked && mode === "rich" ? <RichMarkdownEditor key={activeNote.id} content={richContent} assetURLMap={assetURLMap} setContent={setContent} uploadAssetURL={uploadAssetURL} addToast={addToast} /> : null}
+      {plainUnlocked && mode === "rich" ? <RichMarkdownEditor key={activeNote.id} content={richContent} restoreAssetMarkdown={restoreAssetMarkdown} setContent={setContent} uploadAssetURL={uploadAssetURL} addToast={addToast} /> : null}
       {plainUnlocked && mode === "raw" ? <RawMarkdownEditor content={content} setContent={setContent} upload={upload} addToast={addToast} /> : null}
       {plainUnlocked && mode === "history" ? <History noteID={activeNote.id} currentUser={user} encrypted={activeNote.is_encrypted} securityUnlock={securityUnlock} openUnlock={openUnlock} csrf={csrf} openNote={(id) => api.note(id).then((data) => { setActiveNote(data.note); setVersion(data.version); setShares(data.shares || []); })} addToast={addToast} /> : null}
       {shareOpen && !activeNote.is_encrypted ? <ShareDialog csrf={csrf} noteID={activeNote.id} shares={shares} setShares={setShares} onClose={() => setShareOpen(false)} addToast={addToast} /> : null}
@@ -1132,7 +1141,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
   );
 }
 
-function RichMarkdownEditor({ content, assetURLMap, setContent, uploadAssetURL, addToast }: { content: string; assetURLMap: Map<string, string>; setContent: (value: string | ((current: string) => string)) => void; uploadAssetURL: (file: File) => Promise<string | undefined>; addToast: (message: string, kind?: Toast["kind"]) => number }) {
+function RichMarkdownEditor({ content, restoreAssetMarkdown, setContent, uploadAssetURL, addToast }: { content: string; restoreAssetMarkdown: (markdown: string) => string; setContent: (value: string | ((current: string) => string)) => void; uploadAssetURL: (file: File) => Promise<string | undefined>; addToast: (message: string, kind?: Toast["kind"]) => number }) {
   const editorRef = useRef<MDXEditorMethods>(null);
   const lastMarkdown = useRef(content);
   const plugins = useMemo(() => [
@@ -1186,8 +1195,9 @@ function RichMarkdownEditor({ content, assetURLMap, setContent, uploadAssetURL, 
   }
 
   return (
-    <div className="rich-editor" onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
+    <div className="rich-editor" onDragOverCapture={(event) => event.preventDefault()} onDropCapture={(event) => {
       event.preventDefault();
+      event.stopPropagation();
       const files = Array.from(event.dataTransfer.files || []);
       void insertFiles(files).catch((err) => addToast(messageFromError(err), "error"));
     }}>
@@ -1201,7 +1211,7 @@ function RichMarkdownEditor({ content, assetURLMap, setContent, uploadAssetURL, 
         spellCheck
         onChange={(markdown, initialNormalize) => {
           lastMarkdown.current = markdown;
-          if (!initialNormalize) setContent(restoreAssetURLs(markdown, assetURLMap));
+          if (!initialNormalize) setContent(restoreAssetMarkdown(markdown));
         }}
         onError={(payload) => addToast(payload.error, "error")}
       />
