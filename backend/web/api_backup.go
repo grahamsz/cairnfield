@@ -34,7 +34,7 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, map[string]any{"backups": backupResponses(backups)})
+		writeJSON(w, map[string]any{"backups": s.backupResponses(backups)})
 	case http.MethodPost:
 		running, err := s.store.UserHasRunningBackupExport(r.Context(), cu.User.ID)
 		if err != nil {
@@ -53,7 +53,7 @@ func (s *Server) apiBackups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		go s.runBackupExport(cu.User.ID, backup.ID, filename)
-		writeJSON(w, map[string]any{"backup": backupResponse(backup)})
+		writeJSON(w, map[string]any{"backup": s.backupResponse(backup)})
 	default:
 		methodNotAllowed(w)
 	}
@@ -286,21 +286,21 @@ type backupResponseItem struct {
 	DownloadURL string    `json:"download_url,omitempty"`
 }
 
-func backupResponses(items []store.BackupExport) []backupResponseItem {
+func (s *Server) backupResponses(items []store.BackupExport) []backupResponseItem {
 	out := make([]backupResponseItem, 0, len(items))
 	for _, item := range items {
-		out = append(out, backupResponse(item))
+		out = append(out, s.backupResponse(item))
 	}
 	return out
 }
 
-func backupResponse(item store.BackupExport) backupResponseItem {
+func (s *Server) backupResponse(item store.BackupExport) backupResponseItem {
 	resp := backupResponseItem{
 		ID: item.ID, Status: item.Status, Filename: item.Filename, Size: item.Size, Error: item.Error,
 		CreatedAt: item.CreatedAt, CompletedAt: item.CompletedAt, ExpiresAt: item.ExpiresAt,
 	}
 	if item.Status == "ready" {
-		resp.DownloadURL = fmt.Sprintf("/api/backups/%d/download", item.ID)
+		resp.DownloadURL = s.appPath(fmt.Sprintf("/api/backups/%d/download", item.ID))
 	}
 	return resp
 }

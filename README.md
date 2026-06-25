@@ -29,6 +29,29 @@ docker run -d \
 
 Then open `http://localhost:8080` and create the first admin account.
 
+## Run Under a Subfolder
+
+By default cairnfield serves at the domain root, such as `https://notes.example.com/`.
+To serve it below a path prefix, set `CAIRNFIELD_BASE_PATH` to that prefix.
+Your reverse proxy can either preserve that prefix when forwarding to cairnfield
+or strip it before forwarding; cairnfield will generate prefixed public URLs in
+both cases.
+
+Example for `https://example.com/cairnfield/`:
+
+```sh
+docker run -d \
+  --name cairnfield \
+  -p 8080:8080 \
+  -v cairnfield-data:/data \
+  -e CAIRNFIELD_BASE_PATH="/cairnfield" \
+  ghcr.io/grahamsz/cairnfield:latest
+```
+
+With this setting, the UI, API, assets, service worker, cookies, generated
+attachment links, backup links, and client-side note/search routes all live
+under `/cairnfield`.
+
 ## OIDC Login
 
 cairnfield can show an OIDC sign-in button on the login page. OIDC login only
@@ -40,6 +63,12 @@ Configure your OIDC provider with this redirect URI:
 
 ```text
 https://your-cairnfield-host.example/api/oidc/callback
+```
+
+If you use `CAIRNFIELD_BASE_PATH`, include the prefix:
+
+```text
+https://your-cairnfield-host.example/cairnfield/api/oidc/callback
 ```
 
 For local testing, use the matching local callback URL:

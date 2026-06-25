@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "@fontsource/fraunces/latin-700.css";
 import App from "./App";
 import "./styles.scss";
+import { appURL } from "./base";
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>
@@ -18,6 +19,6 @@ if ("serviceWorker" in navigator) {
       reloaded = true;
       window.location.reload();
     });
-    navigator.serviceWorker.register("/sw.js").then((registration) => registration.update()).catch(() => undefined);
+    navigator.serviceWorker.register(appURL("/sw.js"), { scope: appURL("/") }).then((registration) => registration.update()).catch(() => undefined);
   });
 }

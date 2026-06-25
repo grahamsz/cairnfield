@@ -56,6 +56,7 @@ import {
 } from "@mdxeditor/editor";
 import "@mdxeditor/editor/style.css";
 import { api, messageFromError } from "./api";
+import { appPathname, appURL } from "./base";
 import { decryptBytes, decryptText, downloadKey, encryptBytes, encryptText, generateKey, passphraseIssues, privateKeyMetadata, verifyPrivateKey } from "./crypto";
 import { deleteOfflineNote, loadBrowserPGPKey, loadOfflineBootstrap, loadOfflineSync, noteSummaryFromSync, offlineNote, pendingEdits, queueEdit, removePendingEdits, replaceOfflineFolders, saveBrowserPGPKey, saveOfflineBootstrap, saveOfflineSync, upsertOfflineFolder, upsertOfflineNote, type PendingOperation } from "./offline";
 import type { AuthProvider, BackupExport, Bootstrap, EncryptionKey, FolderRecord, Note, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
@@ -315,7 +316,7 @@ export default function App() {
     setView("search");
     setMobileOpen(false);
     if (historyMode !== "none") {
-      const url = searchURL(trimmed, data.page || page);
+        const url = searchURL(trimmed, data.page || page);
       if (`${window.location.pathname}${window.location.search}` !== url) {
         window.history[historyMode === "replace" ? "replaceState" : "pushState"]({ search: trimmed }, "", url);
       }
@@ -804,7 +805,7 @@ export default function App() {
     <>
       <header className="topbar">
         <button type="button" className="mobile-menu-button ghost" onClick={() => setMobileOpen(true)}><ListIcon /></button>
-        <button type="button" className="brand ghost" onClick={() => setView("editor")}><span className="brand-mark"><img src="/icon.svg" alt="" /></span><span>cairnfield</span></button>
+        <button type="button" className="brand ghost" onClick={() => setView("editor")}><span className="brand-mark"><img src={appURL("/icon.svg")} alt="" /></span><span>cairnfield</span></button>
         <form className="top-search" onSubmit={(event) => { event.preventDefault(); void runSearch().catch((err) => addToast(messageFromError(err), "error")); }}>
           <MagnifyingGlassIcon className="search-icon" />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search notes with title:, path:, tag:, after:, before:" />
@@ -878,7 +879,7 @@ export default function App() {
 }
 
 function AuthShell({ children }: { children: React.ReactNode }) {
-  return <div className="auth-page"><div className="auth-brand"><span className="brand-mark"><img src="/icon.svg" alt="" /></span>cairnfield</div>{children}</div>;
+  return <div className="auth-page"><div className="auth-brand"><span className="brand-mark"><img src={appURL("/icon.svg")} alt="" /></span>cairnfield</div>{children}</div>;
 }
 
 function NewNoteMenu({ templates, createNote, encryptedAvailable, securityUnlocked, openUnlock, editTemplate }: { templates: Template[]; createNote: (templateID?: number, encrypted?: boolean) => Promise<void>; encryptedAvailable: boolean; securityUnlocked: boolean; openUnlock: () => void; editTemplate: (templateID: number) => void }) {
@@ -1102,7 +1103,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       for (const url of urls) {
         if (next.has(url)) continue;
         try {
-          const res = await fetch(url, { headers: { Accept: "application/octet-stream" } });
+          const res = await fetch(appURL(url), { headers: { Accept: "application/octet-stream" } });
           if (!res.ok) continue;
           const encryptedBytes = await res.arrayBuffer();
           const plain = await decryptBytes(encryptedBytes, unlock.privateKeyArmored, unlock.passphrase);
@@ -1170,7 +1171,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
     if (activeNote?.id === snap.activeNote.id) {
       setActiveNote(snap.encrypted ? { ...data.note, title: snap.title } : data.note);
       setVersion(snap.encrypted ? { ...data.version, content: snap.content } : data.version);
-      if (window.location.pathname.startsWith("/notes/")) {
+      if (appPathname().startsWith("/notes/")) {
         window.history.replaceState({ note: data.note.slug }, "", noteURL(snap.encrypted ? { ...data.note, title: snap.title } : data.note));
       }
     }
@@ -1201,8 +1202,8 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       setPlainUnlocked(false);
       setMode("rich");
       setStatus("idle");
-      if (window.location.pathname.startsWith("/notes/")) {
-        window.history.replaceState({ note: note.slug }, "", `/notes/${note.slug || note.id}/encrypted-note`);
+      if (appPathname().startsWith("/notes/")) {
+        window.history.replaceState({ note: note.slug }, "", appURL(`/notes/${note.slug || note.id}/encrypted-note`));
       }
       const signature = JSON.stringify({ title: "Encrypted note", folder: note.folder_path || "/", content: "", encrypted: true });
       lastSavedRef.current = signature;
@@ -1256,7 +1257,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
     };
   }, [activeNote?.id, flushSnapshot]);
 
-  const restoreAssetMarkdown = useCallback((markdown: string) => restoreAssetURLs(markdown, assetURLMapRef.current), []);
+  const restoreAssetMarkdown = useCallback((markdown: string) => restoreAssetURLs(unprefixAssetURLs(markdown), assetURLMapRef.current), []);
 
   useEffect(() => {
     const flushCurrent = () => {
@@ -1401,7 +1402,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
   }
 
   if (!activeNote || !version) return <div className="empty-state"><h1>No note selected</h1><p className="muted">Create a note or choose one from the folder browser.</p></div>;
-  const richContent = encrypted && plainUnlocked && assetURLMap.size > 0 ? replaceAssetURLs(content, assetURLMap) : content;
+  const richContent = prefixAssetURLs(encrypted && plainUnlocked && assetURLMap.size > 0 ? replaceAssetURLs(content, assetURLMap) : content);
 
   return (
     <section className="editor single-editor">
@@ -2747,11 +2748,22 @@ function renderTemplatePreview(value: string) {
 
 function encryptedAssetURLs(markdown: string) {
   const matches = new Set<string>();
-  const pattern = /\/assets\/[a-z0-9]{8}\/[^)\s"']+/gi;
+  const pattern = /(?:\/[^)\s"']*)?\/assets\/[a-z0-9]{8}\/[^)\s"']+/gi;
   for (const match of markdown.matchAll(pattern)) {
     matches.add(match[0]);
   }
   return Array.from(matches);
+}
+
+function prefixAssetURLs(markdown: string) {
+  return (markdown || "").replace(/(\]\(|src=["'])(\/assets\/)/gi, (_match, prefix: string, assetPath: string) => `${prefix}${appURL(assetPath)}`);
+}
+
+function unprefixAssetURLs(markdown: string) {
+  const base = appURL("/").replace(/\/+$/, "");
+  if (!base) return markdown;
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return (markdown || "").replace(new RegExp(`(\\]\\(|src=["'])${escaped}/assets/`, "gi"), "$1/assets/");
 }
 
 function revokeAssetURLMap(map: Map<string, string>) {
@@ -2816,13 +2828,13 @@ function looksEncrypted(value: string) {
 }
 
 function noteKeyFromLocation() {
-  const parts = window.location.pathname.split("/").filter(Boolean);
+  const parts = appPathname().split("/").filter(Boolean);
   if (parts[0] !== "notes" || !parts[1]) return "";
   return parts[1];
 }
 
 function searchRouteFromLocation() {
-  const parts = window.location.pathname.split("/").filter(Boolean);
+  const parts = appPathname().split("/").filter(Boolean);
   if (parts[0] !== "search") return { query: "", page: 1 };
   const params = new URLSearchParams(window.location.search);
   const exact = new URLSearchParams(window.location.search).get("q")?.trim();
@@ -2832,14 +2844,14 @@ function searchRouteFromLocation() {
 
 function noteURL(note: Note) {
   const slug = note.slug || String(note.id);
-  return `/notes/${slug}/${urlSegment(note.title)}`;
+  return appURL(`/notes/${slug}/${urlSegment(note.title)}`);
 }
 
 function searchURL(query: string, page = 1) {
   const trimmed = query.trim();
   const params = new URLSearchParams({ q: trimmed });
   if (page > 1) params.set("page", String(page));
-  return `/search/${urlSegment(trimmed)}?${params}`;
+  return appURL(`/search/${urlSegment(trimmed)}?${params}`);
 }
 
 function urlSegment(value: string) {

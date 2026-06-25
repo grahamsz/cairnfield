@@ -16,6 +16,7 @@ type Config struct {
 	IndexPath    string
 	SessionTTL   time.Duration
 	CookieSecure bool
+	BasePath     string
 	OIDC         oidc.Config
 }
 
@@ -33,6 +34,7 @@ func Load() Config {
 		IndexPath:    getenvAny(filepath.Join(dataDir, "bleve"), "CAIRNFIELD_INDEX_PATH", "NOTES_INDEX_PATH"),
 		SessionTTL:   ttl,
 		CookieSecure: secure,
+		BasePath:     getenvAny("", "CAIRNFIELD_BASE_PATH", "NOTES_BASE_PATH"),
 		OIDC: oidc.Config{
 			Issuer:         getenvAny("", "CAIRNFIELD_OIDC_ISSUER", "NOTES_OIDC_ISSUER"),
 			ClientID:       getenvAny("", "CAIRNFIELD_OIDC_CLIENT_ID", "NOTES_OIDC_CLIENT_ID"),

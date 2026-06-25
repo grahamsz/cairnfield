@@ -1,4 +1,6 @@
-const STATIC_CACHE = "cairnfield-static-v4";
+const STATIC_CACHE = "cairnfield-static-v5";
+const SCOPE_PATH = new URL(self.registration.scope).pathname.replace(/\/+$/, "");
+const BASE_PATH = SCOPE_PATH === "/" ? "" : SCOPE_PATH;
 const SHELL_URLS = [
   "/",
   "/manifest.webmanifest",
@@ -7,7 +9,15 @@ const SHELL_URLS = [
   "/apple-touch-icon.png",
   "/pwa-192.png",
   "/pwa-512.png"
-];
+].map((path) => withBase(path));
+
+function withBase(path) {
+  return `${BASE_PATH}${path}`;
+}
+
+function isAppAPI(pathname) {
+  return pathname.startsWith(withBase("/api/")) || pathname.startsWith(withBase("/assets/"));
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -30,17 +40,17 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/assets/")) return;
+  if (isAppAPI(url.pathname)) return;
 
   if (request.mode === "navigate") {
     event.respondWith(
       fetch(request)
         .then((response) => {
           const copy = response.clone();
-          caches.open(STATIC_CACHE).then((cache) => cache.put("/", copy));
+          caches.open(STATIC_CACHE).then((cache) => cache.put(withBase("/"), copy));
           return response;
         })
-        .catch(() => caches.match("/") || Response.error())
+        .catch(() => caches.match(withBase("/")) || Response.error())
     );
     return;
   }

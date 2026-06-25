@@ -35,7 +35,7 @@ func (s *Server) apiOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	redirectURI := cfg.RedirectURLFor(r)
+	redirectURI := s.oidcRedirectURL(r)
 	authURL, err := oidc.AuthorizationURL(discovery.AuthorizationEndpoint, cfg, redirectURI, state, nonce)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
@@ -44,7 +44,7 @@ func (s *Server) apiOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcStateCookie,
 		Value:    state + "." + nonce,
-		Path:     "/api/oidc",
+		Path:     s.appPath("/api/oidc"),
 		MaxAge:   600,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -78,7 +78,7 @@ func (s *Server) apiOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "OIDC sign-in state has expired")
 		return
 	}
-	clearOIDCStateCookie(w, r, s.cookieSecure)
+	s.clearOIDCStateCookie(w, r)
 	expectedState, nonce, ok := strings.Cut(cookie.Value, ".")
 	if !ok || subtle.ConstantTimeCompare([]byte(state), []byte(expectedState)) != 1 {
 		writeAPIError(w, http.StatusBadRequest, "OIDC sign-in state is invalid")
@@ -89,7 +89,7 @@ func (s *Server) apiOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	token, err := oidc.ExchangeCode(r.Context(), discovery.TokenEndpoint, cfg, cfg.RedirectURLFor(r), code)
+	token, err := oidc.ExchangeCode(r.Context(), discovery.TokenEndpoint, cfg, s.oidcRedirectURL(r), code)
 	if err != nil {
 		writeAPIError(w, http.StatusUnauthorized, err.Error())
 		return
@@ -125,17 +125,24 @@ func (s *Server) apiOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSession(w, r, user.ID)
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.Redirect(w, r, s.appPath("/"), http.StatusFound)
 }
 
-func clearOIDCStateCookie(w http.ResponseWriter, r *http.Request, cookieSecure bool) {
+func (s *Server) oidcRedirectURL(r *http.Request) string {
+	if s.oidc.RedirectURL != "" {
+		return s.oidc.RedirectURL
+	}
+	return oidc.RequestBaseURL(r) + s.appPath("/api/oidc/callback")
+}
+
+func (s *Server) clearOIDCStateCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcStateCookie,
 		Value:    "",
-		Path:     "/api/oidc",
+		Path:     s.appPath("/api/oidc"),
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   cookieSecure || oidc.RequestIsHTTPS(r),
+		Secure:   s.cookieSecure || oidc.RequestIsHTTPS(r),
 	})
 }

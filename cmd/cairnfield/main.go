@@ -42,6 +42,7 @@ func run() error {
 		Search:       searchService,
 		SessionTTL:   cfg.SessionTTL,
 		CookieSecure: cfg.CookieSecure,
+		BasePath:     cfg.BasePath,
 		StaticDir:    filepath.Join("frontend", "dist"),
 		OIDC:         cfg.OIDC,
 	}).Handler()

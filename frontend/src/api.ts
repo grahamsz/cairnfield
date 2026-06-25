@@ -1,4 +1,5 @@
 import type { Asset, BackupExport, Bootstrap, EncryptionKey, FolderRecord, Note, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
+import { appURL } from "./base";
 
 type PageResponse = { notes: NoteSummary[]; page: number; page_size: number; has_more: boolean };
 
@@ -26,19 +27,19 @@ async function parse<T>(res: Response): Promise<T> {
 }
 
 async function getJSON<T>(url: string): Promise<T> {
-  return parse<T>(await fetch(url, { headers: { Accept: "application/json" } }));
+  return parse<T>(await fetch(appURL(url), { headers: { Accept: "application/json" } }));
 }
 
 async function postJSON<T>(url: string, csrf: string, body: unknown = {}): Promise<T> {
-  return parse<T>(await fetch(url, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(body) }));
+  return parse<T>(await fetch(appURL(url), { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(body) }));
 }
 
 async function putJSON<T>(url: string, csrf: string, body: unknown): Promise<T> {
-  return parse<T>(await fetch(url, { method: "PUT", headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(body) }));
+  return parse<T>(await fetch(appURL(url), { method: "PUT", headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(body) }));
 }
 
 async function deleteJSON<T>(url: string, csrf: string): Promise<T> {
-  return parse<T>(await fetch(url, { method: "DELETE", headers: { Accept: "application/json", "X-CSRF-Token": csrf } }));
+  return parse<T>(await fetch(appURL(url), { method: "DELETE", headers: { Accept: "application/json", "X-CSRF-Token": csrf } }));
 }
 
 export const api = {
@@ -78,13 +79,13 @@ export const api = {
     form.set("note_id", String(noteID));
     if (encrypted) form.set("encrypted", "1");
     if (contentType) form.set("content_type", contentType);
-    return parse<{ asset: Asset; url: string }>(await fetch("/api/assets", { method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrf }, body: form }));
+    return parse<{ asset: Asset; url: string }>(await fetch(appURL("/api/assets"), { method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrf }, body: form }));
   },
   importNotes: async (csrf: string, file: File, folderPath = "/") => {
     const form = new FormData();
     form.set("file", file);
     form.set("folder_path", folderPath);
-    return parse<{ notes: Note[]; count: number }>(await fetch("/api/import", { method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrf }, body: form }));
+    return parse<{ notes: Note[]; count: number }>(await fetch(appURL("/api/import"), { method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrf }, body: form }));
   },
   keys: () => getJSON<{ keys: EncryptionKey[] }>("/api/keys"),
   saveKey: (csrf: string, key: Partial<EncryptionKey>) => postJSON<{ key: EncryptionKey }>("/api/keys", csrf, key),

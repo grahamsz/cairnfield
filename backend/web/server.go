@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -39,6 +41,7 @@ type Server struct {
 	search       *search.Service
 	sessionTTL   time.Duration
 	cookieSecure bool
+	basePath     string
 	staticDir    string
 	oidc         oidc.Config
 }
@@ -49,6 +52,7 @@ type Options struct {
 	Search       *search.Service
 	SessionTTL   time.Duration
 	CookieSecure bool
+	BasePath     string
 	StaticDir    string
 	OIDC         oidc.Config
 }
@@ -66,17 +70,47 @@ func New(opts Options) *Server {
 	if opts.SessionTTL <= 0 {
 		opts.SessionTTL = 30 * 24 * time.Hour
 	}
-	srv := &Server{store: opts.Store, blobs: opts.Blobs, search: opts.Search, sessionTTL: opts.SessionTTL, cookieSecure: opts.CookieSecure, staticDir: opts.StaticDir, oidc: opts.OIDC.WithDefaults()}
+	srv := &Server{store: opts.Store, blobs: opts.Blobs, search: opts.Search, sessionTTL: opts.SessionTTL, cookieSecure: opts.CookieSecure, basePath: normalizeBasePath(opts.BasePath), staticDir: opts.StaticDir, oidc: opts.OIDC.WithDefaults()}
 	srv.startBackupCleanup()
 	return srv
 }
 
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/", s.handleAPI)
-	mux.HandleFunc("/assets/", s.handleAsset)
-	mux.HandleFunc("/", s.handleSPA)
-	return s.withCurrentUser(s.securityHeaders(mux))
+	appMux := http.NewServeMux()
+	appMux.HandleFunc("/api/", s.handleAPI)
+	appMux.HandleFunc("/assets/", s.handleAsset)
+	appMux.HandleFunc("/", s.handleSPA)
+	var handler http.Handler = appMux
+	if s.basePath != "" {
+		mux := http.NewServeMux()
+		mux.HandleFunc(s.basePath, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, s.basePath+"/", http.StatusMovedPermanently)
+		})
+		mux.Handle(s.basePath+"/", http.StripPrefix(s.basePath, appMux))
+		mux.Handle("/", appMux)
+		handler = mux
+	}
+	return s.withCurrentUser(s.securityHeaders(handler))
+}
+
+func normalizeBasePath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "/" {
+		return ""
+	}
+	value = "/" + strings.Trim(value, "/")
+	value = path.Clean(value)
+	if value == "/" || value == "." {
+		return ""
+	}
+	return value
+}
+
+func (s *Server) appPath(value string) string {
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	return s.basePath + value
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
@@ -102,7 +136,7 @@ func (s *Server) withCurrentUser(next http.Handler) http.Handler {
 			token, err := auth.NewOpaqueToken()
 			if err == nil {
 				cu.CSRF = token
-				http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: token, Path: "/", SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure})
+				http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: token, Path: s.appPath("/"), SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure})
 			}
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), currentUserKey, cu)))
@@ -225,7 +259,7 @@ func (s *Server) authProviders() []map[string]string {
 	return []map[string]string{{
 		"id":        "oidc",
 		"name":      s.oidc.ProviderName,
-		"login_url": "/api/oidc/login",
+		"login_url": s.appPath("/api/oidc/login"),
 	}}
 }
 
@@ -297,7 +331,7 @@ func (s *Server) setSession(w http.ResponseWriter, r *http.Request, userID int64
 		return
 	}
 	_ = s.store.CreateSession(r.Context(), userID, store.TokenHash(token), s.sessionTTL)
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure, Expires: time.Now().Add(s.sessionTTL)})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: s.appPath("/"), HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure, Expires: time.Now().Add(s.sessionTTL)})
 }
 
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
@@ -308,7 +342,7 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		_ = s.store.DeleteSession(r.Context(), store.TokenHash(c.Value))
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: s.appPath("/"), HttpOnly: true, MaxAge: -1, SameSite: http.SameSiteLaxMode, Secure: s.cookieSecure})
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -830,7 +864,7 @@ func (s *Server) rewriteObsidianEmbeds(ctx context.Context, userID, noteID int64
 			firstErr = err
 			return match
 		}
-		url := fmt.Sprintf("/assets/%s/%s", asset.Slug, urlPathSegment(asset.Filename))
+		url := s.appPath(fmt.Sprintf("/assets/%s/%s", asset.Slug, urlPathSegment(asset.Filename)))
 		changed = true
 		if strings.HasPrefix(contentType, "image/") {
 			return fmt.Sprintf("![%s](%s)", path.Base(file.Name), url)
@@ -994,7 +1028,7 @@ func (s *Server) apiAssets(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"asset": asset, "url": fmt.Sprintf("/assets/%s/%s", asset.Slug, urlPathSegment(asset.Filename))})
+	writeJSON(w, map[string]any{"asset": asset, "url": s.appPath(fmt.Sprintf("/assets/%s/%s", asset.Slug, urlPathSegment(asset.Filename)))})
 }
 
 func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
@@ -1303,5 +1337,19 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, filepath.Join(s.staticDir, "index.html"))
+	data, err := os.ReadFile(filepath.Join(s.staticDir, "index.html"))
+	if err != nil {
+		http.Error(w, "index not found", http.StatusInternalServerError)
+		return
+	}
+	baseHref := s.appPath("/")
+	if baseHref == "" {
+		baseHref = "/"
+	}
+	baseTag := []byte(`<base href="` + html.EscapeString(baseHref) + `">`)
+	if !bytes.Contains(data, []byte("<base ")) {
+		data = bytes.Replace(data, []byte("<head>"), []byte("<head>\n    "+string(baseTag)), 1)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(data)
 }
