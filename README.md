@@ -22,7 +22,7 @@ docker run -d \
   --name cairnfield \
   -p 8080:8080 \
   -v cairnfield-data:/data \
-  ghcr.io/YOUR_GITHUB_ORG/cairnfield:latest
+  ghcr.io/grahamsz/cairnfield:latest
 ```
 
 Then open `http://localhost:8080` and create the first admin account.
