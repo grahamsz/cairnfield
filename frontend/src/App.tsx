@@ -235,7 +235,15 @@ export default function App() {
 
   const loadNotes = useCallback(async () => {
     if (!user) return;
-    const data = await api.notes("");
+    const loaded: NoteSummary[] = [];
+    let page = 1;
+    for (let guard = 0; guard < 400; guard += 1) {
+      const data = await api.notes("", page);
+      loaded.push(...(data.notes || []));
+      if (!data.has_more) break;
+      page = (data.page || page) + 1;
+    }
+    const data = { notes: loaded };
     const list = unlocked ? preserveUnlockedTitles(data.notes || [], decryptedTitleCache.current) : data.notes || [];
     setNotes(list);
     if (!activeNote) {
