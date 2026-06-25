@@ -21,6 +21,8 @@ import {
   PencilSimpleIcon,
   TrashIcon,
   UploadSimpleIcon,
+  MoonIcon,
+  SunIcon,
   StarIcon,
   ShareNetworkIcon,
   SignOutIcon,
@@ -55,18 +57,20 @@ import {
 import "@mdxeditor/editor/style.css";
 import { api, messageFromError } from "./api";
 import { decryptBytes, decryptText, downloadKey, encryptBytes, encryptText, generateKey, passphraseIssues, privateKeyMetadata, verifyPrivateKey } from "./crypto";
-import { clearPendingEdits, loadBrowserPGPKey, pendingEdits, queueEdit, saveBrowserPGPKey } from "./offline";
-import type { AuthProvider, BackupExport, Bootstrap, EncryptionKey, FolderRecord, Note, NoteSummary, NoteVersion, Share, Template, User } from "./types";
+import { deleteOfflineNote, loadBrowserPGPKey, loadOfflineBootstrap, loadOfflineSync, noteSummaryFromSync, offlineNote, pendingEdits, queueEdit, removePendingEdits, replaceOfflineFolders, saveBrowserPGPKey, saveOfflineBootstrap, saveOfflineSync, upsertOfflineFolder, upsertOfflineNote, type PendingOperation } from "./offline";
+import type { AuthProvider, BackupExport, Bootstrap, EncryptionKey, FolderRecord, Note, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
 
 type Toast = { id: number; message: string; kind: "success" | "error" | "loading" };
 type View = "editor" | "folder" | "search" | "settings" | "admin";
 type EditorMode = "rich" | "raw" | "history" | "share";
 type SaveCause = "auto" | "manual";
+type AppTheme = "classic" | "dark";
 type FolderNode = { path: string; name: string; children: FolderNode[]; notes: NoteSummary[]; noteCount: number };
 type ImportRequest = { files: File[]; folderPath: string };
 type SecurityUnlock = { keyID: number; label: string; fingerprint: string; publicKeyArmored: string; privateKeyArmored: string; passphrase: string; unlockedUntil: number };
 type EditorSnapshot = { activeNote: Note; version: NoteVersion; title: string; folder: string; content: string; encrypted: boolean; plainUnlocked: boolean; securityUnlock: SecurityUnlock | null; defaultKey: EncryptionKey | null; signature: string };
 type DateFormatOption = { value: string; label: string; sample: string };
+type SyncPushResult = { op?: "create" | "update"; client_id?: string; note_id?: number; note?: Note; version?: NoteVersion; conflict?: boolean; error?: string };
 
 let toastSeq = 1;
 const appLockChannelName = "cairnfield-lock";
@@ -105,6 +109,8 @@ export default function App() {
   const [securityUnlock, setSecurityUnlock] = useState<SecurityUnlock | null>(null);
   const [securityUnlockOpen, setSecurityUnlockOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [offlineMode, setOfflineMode] = useState(!navigator.onLine);
+  const [appTheme, setAppTheme] = useState<AppTheme>(() => themeFromValue(window.localStorage.getItem("cairnfield-theme")));
   const decryptedTitleCache = useRef<Map<number, string>>(new Map());
 
   const csrf = bootstrap?.csrf || "";
@@ -120,17 +126,58 @@ export default function App() {
     return id;
   }, []);
 
+  const applyOfflineSync = useCallback((data: SyncBootstrap) => {
+    const list = (data.notes || []).map(noteSummaryFromSync);
+    const visible = unlocked ? preserveUnlockedTitles(list, decryptedTitleCache.current) : list;
+    setNotes(visible);
+    setFolders(data.folders || []);
+    return visible;
+  }, [unlocked]);
+
+  const refreshOfflineCache = useCallback(async () => {
+    if (!user || !navigator.onLine) return null;
+    const data = await api.syncBootstrap();
+    await saveOfflineSync(data);
+    applyOfflineSync(data);
+    return data;
+  }, [applyOfflineSync, user]);
+
+  const loadCachedApp = useCallback(async () => {
+    const cachedBootstrap = await loadOfflineBootstrap();
+    const cachedSync = await loadOfflineSync();
+    if (cachedBootstrap) {
+      setBootstrap(cachedBootstrap);
+      setTemplates(cachedBootstrap.templates || []);
+    }
+    const list = applyOfflineSync(cachedSync);
+    setOfflineMode(true);
+    return { bootstrap: cachedBootstrap, notes: list, sync: cachedSync };
+  }, [applyOfflineSync]);
+
   const lockApp = useCallback((broadcast = true) => {
+    decryptedTitleCache.current.clear();
     setSecurityUnlock(null);
     setSecurityUnlockOpen(false);
+    setNotes((items) => reblindEncryptedSummaries(items));
+    setFolderNotes((items) => reblindEncryptedSummaries(items));
+    setSearchResults((items) => reblindEncryptedSummaries(items));
+    setActiveNote((note) => note?.is_encrypted ? { ...note, title: "Encrypted note" } : note);
     if (broadcast) broadcastAppLock();
   }, []);
 
   const refreshBootstrap = useCallback(async () => {
-    const data = await api.bootstrap();
-    setBootstrap(data);
-    setTemplates(data.templates || []);
-  }, []);
+    try {
+      const data = await api.bootstrap();
+      setBootstrap(data);
+      setTemplates(data.templates || []);
+      setOfflineMode(false);
+      if (data.user) await saveOfflineBootstrap(data);
+    } catch (err) {
+      const cached = await loadCachedApp();
+      if (!cached.bootstrap) throw err;
+      addToast("Offline mode. Cached notes are available.", "error");
+    }
+  }, [addToast, loadCachedApp]);
 
   const updateCurrentUser = useCallback((nextUser: User) => {
     setBootstrap((current) => current ? { ...current, user: nextUser } : current);
@@ -143,11 +190,31 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
+    document.documentElement.dataset.theme = appTheme;
+    document.documentElement.style.colorScheme = appTheme === "dark" ? "dark" : "light";
+    window.localStorage.setItem("cairnfield-theme", appTheme);
+  }, [appTheme]);
+
+  useEffect(() => {
+    if (user?.theme) setAppTheme(themeFromValue(user.theme));
+  }, [user?.theme]);
+
+  useEffect(() => {
     if (!securityUnlock?.unlockedUntil) return;
     const delay = Math.max(0, securityUnlock.unlockedUntil - Date.now());
     const timer = window.setTimeout(() => lockApp(true), delay);
     return () => window.clearTimeout(timer);
   }, [lockApp, securityUnlock?.unlockedUntil]);
+
+  useEffect(() => {
+    const updateOnlineState = () => setOfflineMode(!navigator.onLine);
+    window.addEventListener("online", updateOnlineState);
+    window.addEventListener("offline", updateOnlineState);
+    return () => {
+      window.removeEventListener("online", updateOnlineState);
+      window.removeEventListener("offline", updateOnlineState);
+    };
+  }, []);
 
   useEffect(() => {
     const onServiceWorkerMessage = (event: MessageEvent) => {
@@ -184,7 +251,17 @@ export default function App() {
 
   const openNote = useCallback(async (id: number | string, historyMode: "push" | "replace" | "none" = "push") => {
     try {
-      const data = await api.note(id);
+      let data: { note: Note; version: NoteVersion; shares: Share[] };
+      try {
+        data = await api.note(id);
+        await upsertOfflineNote(data.note, data.version);
+        setOfflineMode(false);
+      } catch (err) {
+        const cached = await offlineNote(id);
+        if (!cached) throw err;
+        data = { note: cached.note, version: cached.version, shares: [] };
+        setOfflineMode(true);
+      }
       let note = data.note;
       let noteVersion = data.version;
       if (unlocked && note.is_encrypted) {
@@ -219,7 +296,17 @@ export default function App() {
   const executeSearch = useCallback(async (searchQuery: string, historyMode: "push" | "replace" | "none" = "push", page = 1) => {
     const trimmed = searchQuery.trim();
     if (!trimmed) return;
-    const data = await api.search(trimmed, page);
+    let data: { notes: NoteSummary[]; page: number; has_more: boolean };
+    try {
+      if (offlineMode || !navigator.onLine) throw new Error("offline");
+      data = await api.search(trimmed, page);
+      setOfflineMode(false);
+    } catch {
+      const cached = await loadOfflineSync();
+      const results = await offlineSearch(cached, trimmed, unlocked, decryptedTitleCache.current);
+      data = { notes: paginate(results, page, 50), page, has_more: results.length > page * 50 };
+      setOfflineMode(true);
+    }
     setQuery(trimmed);
     setSearchResults(unlocked ? preserveUnlockedTitles(data.notes || [], decryptedTitleCache.current) : data.notes || []);
     setSearchPage(data.page || page);
@@ -233,21 +320,21 @@ export default function App() {
         window.history[historyMode === "replace" ? "replaceState" : "pushState"]({ search: trimmed }, "", url);
       }
     }
-  }, [unlocked]);
+  }, [offlineMode, unlocked]);
 
   const loadNotes = useCallback(async () => {
     if (!user) return;
-    const loaded: NoteSummary[] = [];
-    let page = 1;
-    for (let guard = 0; guard < 400; guard += 1) {
-      const data = await api.notes("", page);
-      loaded.push(...(data.notes || []));
-      if (!data.has_more) break;
-      page = (data.page || page) + 1;
+    let list: NoteSummary[] = [];
+    try {
+      const data = await refreshOfflineCache();
+      list = data ? (data.notes || []).map(noteSummaryFromSync) : [];
+      if (unlocked) list = preserveUnlockedTitles(list, decryptedTitleCache.current);
+      setOfflineMode(false);
+    } catch {
+      const cached = await loadOfflineSync();
+      list = applyOfflineSync(cached);
+      setOfflineMode(true);
     }
-    const data = { notes: loaded };
-    const list = unlocked ? preserveUnlockedTitles(data.notes || [], decryptedTitleCache.current) : data.notes || [];
-    setNotes(list);
     if (!activeNote) {
       const routeKey = noteKeyFromLocation();
       const routeSearch = searchRouteFromLocation();
@@ -255,12 +342,19 @@ export default function App() {
       else if (routeKey) void openNote(routeKey, "replace");
       else if (list[0]) void openNote(list[0].id, "replace");
     }
-  }, [activeNote, executeSearch, openNote, unlocked, user]);
+  }, [activeNote, applyOfflineSync, executeSearch, openNote, refreshOfflineCache, unlocked, user]);
 
   const loadFolders = useCallback(async () => {
     if (!user) return;
-    const data = await api.folders();
-    setFolders(data.folders || []);
+    try {
+      const data = await api.folders();
+      setFolders(data.folders || []);
+      await replaceOfflineFolders(data.folders || []);
+    } catch {
+      const cached = await loadOfflineSync();
+      setFolders(cached.folders || []);
+      setOfflineMode(true);
+    }
   }, [user]);
 
   useEffect(() => {
@@ -298,15 +392,56 @@ export default function App() {
       if (!navigator.onLine) return;
       const edits = await pendingEdits();
       if (edits.length === 0) return;
-      const res = await api.syncPush(csrf, edits);
-      await clearPendingEdits();
-      addToast(`Synced ${res.results.length} offline edit${res.results.length === 1 ? "" : "s"}.`);
-      await loadNotes();
+      const results: SyncPushResult[] = [];
+      const serverReplacements = new Map<number, { note: Note; version: NoteVersion }>();
+      for (const edit of edits) {
+        const outgoing = translatePendingOperation(edit, serverReplacements);
+        const res = await api.syncPush(csrf, [outgoing]);
+        const item = ((res.results || [])[0] || {}) as SyncPushResult;
+        results.push(item);
+        if (item.error || !item.client_id) break;
+        await removePendingEdits([item.client_id]);
+        if (item.note && item.version) await upsertOfflineNote(item.note, item.version);
+        if (item.op === "create" && typeof item.note_id === "number" && item.note && item.version) {
+          serverReplacements.set(item.note_id, { note: item.note, version: item.version });
+          await deleteOfflineNote(item.note_id);
+        }
+      }
+      const idReplacements = new Map<number, number>();
+      for (const item of results) {
+        if (item.op === "create" && typeof item.note_id === "number" && item.note) idReplacements.set(item.note_id, item.note.id);
+      }
+      const successful = results.filter((item) => !item.error && item.client_id);
+      if (idReplacements.size > 0) {
+        const replaceID = (note: NoteSummary) => {
+          const result = results.find((item) => item.note_id === note.id && item.note && item.version);
+          return result?.note && result.version ? { ...note, ...result.note, id: result.note.id, current_version_id: result.version.id } : note;
+        };
+        setNotes((items) => items.map(replaceID));
+        setFolderNotes((items) => items.map(replaceID));
+        setSearchResults((items) => items.map(replaceID));
+        setActiveNote((note) => {
+          if (!note || !idReplacements.has(note.id)) return note;
+          const result = results.find((item) => item.note_id === note.id && item.note);
+          if (!result?.note) return { ...note, id: idReplacements.get(note.id)! };
+          return { ...result.note, title: note.is_encrypted && !looksEncrypted(note.title) ? note.title : result.note.title };
+        });
+        setVersion((current) => {
+          if (!activeNote || !current || !idReplacements.has(activeNote.id)) return current;
+          const result = results.find((item) => item.note_id === activeNote.id && item.version);
+          if (!result?.version) return current;
+          return { ...result.version, content: activeNote.is_encrypted && current.content && !looksEncrypted(current.content) ? current.content : result.version.content };
+        });
+      }
+      const failures = results.filter((item) => item.error);
+      if (successful.length > 0) addToast(`Synced ${successful.length} offline edit${successful.length === 1 ? "" : "s"}.`);
+      if (failures.length > 0) addToast(`${failures.length} offline edit${failures.length === 1 ? "" : "s"} still pending.`, "error");
+      await refreshOfflineCache().catch(() => loadNotes());
     }
     window.addEventListener("online", flush);
     void flush().catch(() => undefined);
     return () => window.removeEventListener("online", flush);
-  }, [addToast, csrf, loadNotes, user]);
+  }, [addToast, csrf, loadNotes, refreshOfflineCache, user]);
 
   async function runSearch() {
     await executeSearch(query, "push", 1);
@@ -314,7 +449,20 @@ export default function App() {
 
   async function openFolder(path: string, page = 1) {
     try {
-      const data = path === "__trash" ? await api.trash(page) : path === "__starred" ? await api.starred(page) : await api.notes(path, page);
+      let data: { notes: NoteSummary[]; page: number; has_more: boolean };
+      try {
+        if (offlineMode || !navigator.onLine) throw new Error("offline");
+        data = path === "__trash" ? await api.trash(page) : path === "__starred" ? await api.starred(page) : await api.notes(path, page);
+        setOfflineMode(false);
+      } catch (err) {
+        if (path === "__trash") throw err;
+        const cached = await loadOfflineSync();
+        const all = (cached.notes || []).map(noteSummaryFromSync)
+          .filter((note) => path === "__starred" ? note.is_starred : !path || path === "/" ? true : normalizeFolderPath(note.folder_path || "/") === normalizeFolderPath(path))
+          .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+        data = { notes: paginate(all, page, 50), page, has_more: all.length > page * 50 };
+        setOfflineMode(true);
+      }
       const summaries = unlocked ? preserveUnlockedTitles(data.notes || [], decryptedTitleCache.current) : data.notes || [];
       const list = [...summaries].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
       setFolderNotes(list);
@@ -345,6 +493,62 @@ export default function App() {
         return;
       }
       const targetFolder = currentNoteTargetFolder(folder);
+      if (offlineMode || !navigator.onLine) {
+        const template = templates.find((item) => item.id === templateID);
+        let plainTitle = renderTemplatePreview(template?.title_template || "Untitled").trim() || "Untitled";
+        let plainContent = renderTemplatePreview(template?.body_template || "");
+        const noteFolder = template?.folder_template ? normalizeFolderPath(renderTemplatePreview(template.folder_template)) : targetFolder;
+        const tempID = -Date.now();
+        const createdAt = new Date().toISOString();
+        let storedTitle = plainTitle;
+        let storedContent = plainContent;
+        if (encryptedNote) {
+          const encryptionKey = unlocked?.publicKeyArmored || defaultKey!.public_key_armored;
+          storedTitle = await encryptText(plainTitle, encryptionKey);
+          storedContent = await encryptText(plainContent, encryptionKey);
+        }
+        const note: Note = {
+          id: tempID,
+          owner_user_id: userID,
+          folder_path: noteFolder,
+          title: encryptedNote ? plainTitle : storedTitle,
+          slug: `offline-${Math.abs(tempID)}`,
+          current_version_id: tempID,
+          is_encrypted: encryptedNote,
+          is_shared: false,
+          is_starred: false,
+          updated_at: createdAt,
+          created_at: createdAt
+        };
+        const version: NoteVersion = {
+          id: tempID,
+          note_id: tempID,
+          user_id: userID,
+          content: encryptedNote ? plainContent : storedContent,
+          header_json: "{}",
+          body_sha256: "",
+          base_version_id: 0,
+          client_id: crypto.randomUUID(),
+          conflicted: false,
+          created_at: createdAt
+        };
+        await queueEdit({ op: "create", note_id: tempID, base_version_id: 0, title: storedTitle, folder_path: noteFolder, content: storedContent, header_json: "{}", client_id: version.client_id, is_encrypted: encryptedNote });
+        await upsertOfflineNote({ ...note, title: storedTitle }, { ...version, content: storedContent });
+        const visible = { ...note, preview: encryptedNote ? "" : plainContent };
+        if (encryptedNote) decryptedTitleCache.current.set(tempID, plainTitle);
+        setNotes((items) => [visible, ...(items || [])]);
+        const folderRecord = { id: 0, user_id: userID, path: noteFolder, created_at: createdAt, updated_at: createdAt };
+        await upsertOfflineFolder(folderRecord);
+        setFolders((items) => upsertFolder(items, folderRecord));
+        setActiveNote(note);
+        setVersion(version);
+        setFolder(noteFolder);
+        setExpandedFolders((current) => expandAncestors(current, noteFolder));
+        window.history.pushState({ note: note.slug }, "", noteURL(note));
+        setView("editor");
+        addToast("Created offline. It will sync when online.");
+        return;
+      }
       const data = await api.createNote(csrf, templateID, targetFolder);
       let note = data.note;
       let version = data.version;
@@ -368,6 +572,7 @@ export default function App() {
         decryptedTitleCache.current.set(note.id, note.title);
       }
       setNotes((items) => data.reused ? (items || []) : [{ ...note, preview: note.is_encrypted ? "" : version.content }, ...(items || [])]);
+      await upsertOfflineNote(data.note, data.version);
       setFolders((items) => upsertFolder(items, { id: 0, user_id: userID, path: note.folder_path, created_at: note.created_at, updated_at: note.updated_at }));
       setActiveNote(note);
       setVersion(version);
@@ -382,6 +587,10 @@ export default function App() {
 
   async function createFolder(parent: string, name: string) {
     try {
+      if (offlineMode || !navigator.onLine) {
+        addToast("Folder changes are unavailable offline.", "error");
+        return;
+      }
       const path = joinFolderPath(parent, name);
       const data = await api.createFolder(csrf, path);
       setFolders((items) => upsertFolder(items, data.folder));
@@ -395,6 +604,10 @@ export default function App() {
 
   async function moveNotesToFolder(noteIDs: number[], targetFolder: string) {
     try {
+      if (offlineMode || !navigator.onLine) {
+        addToast("Moving notes is unavailable offline.", "error");
+        return;
+      }
       let latest: { note: Note; version: NoteVersion } | null = null;
       for (const noteID of noteIDs) {
         latest = await api.moveNote(csrf, noteID, targetFolder);
@@ -418,6 +631,10 @@ export default function App() {
   }
 
   async function moveFolderToFolder(source: string, targetParent: string) {
+    if (offlineMode || !navigator.onLine) {
+      addToast("Folder changes are unavailable offline.", "error");
+      return;
+    }
     const normalizedSource = normalizeFolderPath(source);
     const normalizedTarget = normalizeFolderPath(targetParent);
     const destination = joinFolderPath(normalizedTarget, folderNameFromPath(normalizedSource));
@@ -446,6 +663,10 @@ export default function App() {
   async function starDraggedNotes(noteIDs: number[]) {
     if (noteIDs.length === 0) return;
     try {
+      if (offlineMode || !navigator.onLine) {
+        addToast("Star changes are unavailable offline.", "error");
+        return;
+      }
       for (const noteID of noteIDs) {
         await api.starNote(csrf, noteID, true);
       }
@@ -462,6 +683,10 @@ export default function App() {
 
   async function trashDraggedNotes(noteIDs: number[]) {
     if (noteIDs.length === 0) return;
+    if (offlineMode || !navigator.onLine) {
+      addToast("Trash is unavailable offline.", "error");
+      return;
+    }
     if (!window.confirm(`Move ${noteIDs.length} selected note${noteIDs.length === 1 ? "" : "s"} to Trash?`)) return;
     try {
       for (const noteID of noteIDs) {
@@ -514,6 +739,10 @@ export default function App() {
 
   async function importFiles(files: File[], targetFolder: string) {
     try {
+      if (offlineMode || !navigator.onLine) {
+        addToast("Import is unavailable offline.", "error");
+        return;
+      }
       let count = 0;
       for (const file of files) {
         const result = await api.importNotes(csrf, file, targetFolder);
@@ -529,9 +758,33 @@ export default function App() {
 
   async function logout() {
     await api.logout(csrf);
+    decryptedTitleCache.current.clear();
+    setSecurityUnlock(null);
     setBootstrap({ ...bootstrap!, user: null });
     setActiveNote(null);
     setVersion(null);
+    setNotes([]);
+    setFolderNotes([]);
+    setSearchResults([]);
+  }
+
+  async function toggleTheme() {
+    if (!user) return;
+    const nextTheme: AppTheme = appTheme === "dark" ? "classic" : "dark";
+    setAppTheme(nextTheme);
+    if (!navigator.onLine || offlineMode) {
+      updateCurrentUser({ ...user, theme: nextTheme });
+      addToast("Theme changed locally. Profile sync is unavailable offline.", "error");
+      return;
+    }
+    try {
+      const data = await api.updateProfile(csrf, { date_format: dateFormat, theme: nextTheme });
+      updateCurrentUser(data.user);
+      await saveOfflineBootstrap({ ...bootstrap!, user: data.user });
+    } catch (err) {
+      updateCurrentUser({ ...user, theme: nextTheme });
+      addToast(messageFromError(err), "error");
+    }
   }
 
   function beginSidebarResize(event: React.PointerEvent<HTMLButtonElement>) {
@@ -557,6 +810,10 @@ export default function App() {
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search notes with title:, path:, tag:, after:, before:" />
         </form>
         <div className="top-actions">
+          {offlineMode ? <span className="offline-pill">Offline</span> : null}
+          <button type="button" className="theme-toggle ghost" title={appTheme === "dark" ? "Use light theme" : "Use dark theme"} aria-label={appTheme === "dark" ? "Use light theme" : "Use dark theme"} onClick={() => void toggleTheme()}>
+            {appTheme === "dark" ? <SunIcon /> : <MoonIcon />}
+          </button>
           {keys.length > 0 ? <button type="button" className={`ghost global-lock ${unlocked ? "unlocked" : ""}`} title={unlocked ? "Lock app" : "Unlock app"} aria-label={unlocked ? "Lock app" : "Unlock app"} onClick={() => unlocked ? lockApp(true) : setSecurityUnlockOpen(true)}>{unlocked ? <LockOpenIcon /> : <LockIcon />}</button> : null}
           <NewNoteMenu
             templates={templates}
@@ -608,9 +865,9 @@ export default function App() {
         <main className="content">
           {view === "settings" ? <SettingsView csrf={csrf} user={user} updateUser={updateCurrentUser} templates={templates} initialTemplateID={templateEditID} setTemplates={setTemplates} keys={keys} setKeys={setKeys} addToast={addToast} /> :
             view === "admin" ? <AdminView csrf={csrf} addToast={addToast} /> :
-            view === "search" ? <NoteListView csrf={csrf} title="Search" subtitle={`${searchResults.length.toLocaleString()} result${searchResults.length === 1 ? "" : "s"} on page ${searchPage} for ${query}`} results={searchResults} setResults={setSearchResults} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} highlight={query} addToast={addToast} page={searchPage} hasMore={searchHasMore} onPageChange={(page) => executeSearch(query, "push", page)} /> :
+            view === "search" ? <NoteListView csrf={csrf} title="Search" subtitle={`${searchResults.length.toLocaleString()} result${searchResults.length === 1 ? "" : "s"} on page ${searchPage} for ${query}${offlineMode ? " - Offline search is limited" : ""}`} results={searchResults} setResults={setSearchResults} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} highlight={query} addToast={addToast} page={searchPage} hasMore={searchHasMore} onPageChange={(page) => executeSearch(query, "push", page)} offlineMode={offlineMode} /> :
             view === "folder" ? <NoteListView csrf={csrf} title={folderTitle(folder)} subtitle={`${folderNotes.length.toLocaleString()} note${folderNotes.length === 1 ? "" : "s"} on page ${folderPage}, recently edited first`} results={folderNotes} setResults={setFolderNotes} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} addToast={addToast} page={folderPage} hasMore={folderHasMore} onPageChange={(page) => openFolder(folder, page)} action={folder === "__trash" ? <button type="button" className="secondary danger-action" disabled={folderNotes.length === 0} onClick={() => void emptyTrash()}><TrashIcon />Empty trash</button> : null} /> :
-            <EditorView csrf={csrf} user={user} activeNote={activeNote} version={version} shares={shares} defaultKey={defaultKey} securityUnlock={unlocked} openUnlock={() => setSecurityUnlockOpen(true)} rememberDecryptedTitle={(id, title) => decryptedTitleCache.current.set(id, title)} setActiveNote={setActiveNote} setVersion={setVersion} setShares={setShares} setNotes={setNotes} reloadNotes={loadNotes} addToast={addToast} />}
+            <EditorView csrf={csrf} user={user} activeNote={activeNote} version={version} shares={shares} defaultKey={defaultKey} securityUnlock={unlocked} openUnlock={() => setSecurityUnlockOpen(true)} rememberDecryptedTitle={(id, title) => decryptedTitleCache.current.set(id, title)} setActiveNote={setActiveNote} setVersion={setVersion} setShares={setShares} setNotes={setNotes} reloadNotes={loadNotes} addToast={addToast} offlineMode={offlineMode} />}
         </main>
       </div>
       {importRequest ? <ImportApprovalDialog request={importRequest} onCancel={() => setImportRequest(null)} onApprove={() => { const req = importRequest; setImportRequest(null); void importFiles(req.files, req.folderPath); }} /> : null}
@@ -723,7 +980,7 @@ function AuthForm({ title, submitLabel, loginOnly = false, authProviders = [], o
   );
 }
 
-function EditorView({ csrf, user, activeNote, version, shares, defaultKey, securityUnlock, openUnlock, rememberDecryptedTitle, setActiveNote, setVersion, setShares, setNotes, reloadNotes, addToast }: {
+function EditorView({ csrf, user, activeNote, version, shares, defaultKey, securityUnlock, openUnlock, rememberDecryptedTitle, setActiveNote, setVersion, setShares, setNotes, reloadNotes, addToast, offlineMode }: {
   csrf: string;
   user: User;
   activeNote: Note | null;
@@ -739,6 +996,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
   setNotes: React.Dispatch<React.SetStateAction<NoteSummary[]>>;
   reloadNotes: () => Promise<void>;
   addToast: (message: string, kind?: Toast["kind"]) => number;
+  offlineMode: boolean;
 }) {
   const [mode, setMode] = useState<EditorMode>("rich");
   const [title, setTitle] = useState("");
@@ -888,11 +1146,26 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
     const edit = { note_id: snap.activeNote.id, base_version_id: snap.version.id, title: saveTitle, folder_path: snap.folder, content: saveContent, header_json: "{}", client_id: crypto.randomUUID(), is_encrypted: snap.encrypted, autosave: cause === "auto" };
     if (!navigator.onLine) {
       await queueEdit(edit);
+      const cachedNote = { ...snap.activeNote, title: saveTitle, folder_path: snap.folder, updated_at: new Date().toISOString() };
+      const cachedVersion = { ...snap.version, content: saveContent, header_json: "{}", client_id: edit.client_id };
+      await upsertOfflineNote(cachedNote, cachedVersion);
+      setNotes((items) => (items || []).map((item) => item.id === snap.activeNote.id ? { ...item, title: snap.title, folder_path: snap.folder, preview: snap.encrypted ? "" : snap.content.slice(0, 180), updated_at: cachedNote.updated_at } : item));
       if (activeNote?.id === snap.activeNote.id) setStatus("offline");
       return;
     }
     if (activeNote?.id === snap.activeNote.id) setStatus("saving");
-    const data = await api.saveNote(csrf, snap.activeNote.id, edit);
+    let data: { note: Note; version: NoteVersion; conflict: boolean };
+    try {
+      data = await api.saveNote(csrf, snap.activeNote.id, edit);
+    } catch (err) {
+      await queueEdit(edit);
+      const cachedNote = { ...snap.activeNote, title: saveTitle, folder_path: snap.folder, updated_at: new Date().toISOString() };
+      const cachedVersion = { ...snap.version, content: saveContent, header_json: "{}", client_id: edit.client_id };
+      await upsertOfflineNote(cachedNote, cachedVersion);
+      if (activeNote?.id === snap.activeNote.id) setStatus("offline");
+      throw err;
+    }
+    await upsertOfflineNote(data.note, data.version);
     if (snap.encrypted) rememberDecryptedTitle(data.note.id, snap.title || "Untitled");
     if (activeNote?.id === snap.activeNote.id) {
       setActiveNote(snap.encrypted ? { ...data.note, title: snap.title } : data.note);
@@ -970,7 +1243,6 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
     const timer = window.setTimeout(() => {
       void save("auto").catch((err) => {
         setStatus("offline");
-        if (!encrypted) void queueEdit({ note_id: activeNote.id, base_version_id: version.id, title, folder_path: folder, content, header_json: "{}", client_id: crypto.randomUUID(), is_encrypted: encrypted, autosave: true });
         addToast(`Autosave queued: ${messageFromError(err)}`, "error");
       });
     }, 1800);
@@ -1006,6 +1278,9 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
 
   async function uploadAssetURL(file: File) {
     if (!activeNote) return;
+    if (offlineMode || !navigator.onLine) {
+      throw new Error("File uploads are unavailable offline.");
+    }
     if (encrypted) {
       const encryptionKey = securityUnlock?.publicKeyArmored || defaultKey?.public_key_armored || "";
       if (!securityUnlock || !encryptionKey) {
@@ -1037,6 +1312,10 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
 
   async function trashCurrent() {
     if (!activeNote) return;
+    if (offlineMode || !navigator.onLine) {
+      addToast("Trash is unavailable offline.", "error");
+      return;
+    }
     const sharedOnly = activeNote.owner_user_id !== user.id;
     const message = sharedOnly
       ? "Remove this shared note from your account? The original note will not be deleted."
@@ -1051,6 +1330,10 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
 
   async function wipeCurrent() {
     if (!activeNote) return;
+    if (offlineMode || !navigator.onLine) {
+      addToast("Delete is unavailable offline.", "error");
+      return;
+    }
     const sharedOnly = activeNote.owner_user_id !== user.id;
     const message = sharedOnly
       ? "Permanently remove this shared note for yourself? The original note will remain for its owner."
@@ -1065,6 +1348,10 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
 
   async function restoreCurrent() {
     if (!activeNote) return;
+    if (offlineMode || !navigator.onLine) {
+      addToast("Restore is unavailable offline.", "error");
+      return;
+    }
     const data = await api.untrashNote(csrf, activeNote.id);
     setActiveNote(data.note);
     setVersion(data.version);
@@ -1134,6 +1421,10 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
           </div>
           <button type="button" className={`icon-only secondary ${mode === "history" ? "active" : ""}`} title="Version history" aria-label="Version history" onClick={() => setMode("history")}><ClockCounterClockwiseIcon /></button>
           <button type="button" className={`icon-only secondary ${activeNote.is_shared ? "shared-action" : ""}`} title="Share note" aria-label="Share note" onClick={() => {
+            if (offlineMode || !navigator.onLine) {
+              addToast("Sharing is unavailable offline.", "error");
+              return;
+            }
             if (activeNote.is_encrypted) {
               addToast("Encrypted notes cannot be shared.", "error");
               return;
@@ -1150,7 +1441,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       {encrypted && !plainUnlocked ? <LockedNoteView openUnlock={openUnlock} /> : null}
       {plainUnlocked && mode === "rich" ? <RichMarkdownEditor key={activeNote.id} content={richContent} restoreAssetMarkdown={restoreAssetMarkdown} setContent={setContent} uploadAssetURL={uploadAssetURL} addToast={addToast} /> : null}
       {plainUnlocked && mode === "raw" ? <RawMarkdownEditor content={content} setContent={setContent} upload={upload} addToast={addToast} /> : null}
-      {plainUnlocked && mode === "history" ? <History noteID={activeNote.id} currentUser={user} encrypted={activeNote.is_encrypted} securityUnlock={securityUnlock} openUnlock={openUnlock} csrf={csrf} openNote={(id) => api.note(id).then((data) => { setActiveNote(data.note); setVersion(data.version); setShares(data.shares || []); })} addToast={addToast} /> : null}
+      {plainUnlocked && mode === "history" ? offlineMode || !navigator.onLine ? <div className="panel muted">Version history is unavailable offline.</div> : <History noteID={activeNote.id} currentUser={user} encrypted={activeNote.is_encrypted} securityUnlock={securityUnlock} openUnlock={openUnlock} csrf={csrf} openNote={(id) => api.note(id).then((data) => { setActiveNote(data.note); setVersion(data.version); setShares(data.shares || []); })} addToast={addToast} /> : null}
       {shareOpen && !activeNote.is_encrypted ? <ShareDialog csrf={csrf} noteID={activeNote.id} shares={shares} setShares={setShares} onClose={() => setShareOpen(false)} addToast={addToast} /> : null}
     </section>
   );
@@ -1477,7 +1768,7 @@ function PGPUnlockDialog({ keys, onClose, onUnlocked, addToast }: { keys: Encryp
   );
 }
 
-function NoteListView({ csrf, title, subtitle, results, setResults, selected, setSelected, openNote, securityUnlocked, addToast, highlight = "", action = null, page, hasMore, onPageChange }: { csrf: string; title: string; subtitle: string; results: NoteSummary[]; setResults: React.Dispatch<React.SetStateAction<NoteSummary[]>>; selected: Set<number>; setSelected: React.Dispatch<React.SetStateAction<Set<number>>>; openNote: (id: number | string) => Promise<void>; securityUnlocked: boolean; addToast: (message: string, kind?: Toast["kind"]) => number; highlight?: string; action?: React.ReactNode; page: number; hasMore: boolean; onPageChange: (page: number) => Promise<void> }) {
+function NoteListView({ csrf, title, subtitle, results, setResults, selected, setSelected, openNote, securityUnlocked, addToast, highlight = "", action = null, page, hasMore, onPageChange, offlineMode = false }: { csrf: string; title: string; subtitle: string; results: NoteSummary[]; setResults: React.Dispatch<React.SetStateAction<NoteSummary[]>>; selected: Set<number>; setSelected: React.Dispatch<React.SetStateAction<Set<number>>>; openNote: (id: number | string) => Promise<void>; securityUnlocked: boolean; addToast: (message: string, kind?: Toast["kind"]) => number; highlight?: string; action?: React.ReactNode; page: number; hasMore: boolean; onPageChange: (page: number) => Promise<void>; offlineMode?: boolean }) {
   const [selectionAnchor, setSelectionAnchor] = useState<number | null>(null);
   const allSelected = results.length > 0 && selected.size === results.length;
   function toggleSelected(id: number, checked: boolean, shiftKey = false) {
@@ -1500,10 +1791,12 @@ function NoteListView({ csrf, title, subtitle, results, setResults, selected, se
     setSelectionAnchor(id);
   }
   async function setStar(note: NoteSummary, starred: boolean) {
+    if (offlineMode || !navigator.onLine) throw new Error("Star changes are unavailable offline.");
     const data = await api.starNote(csrf, note.id, starred);
     setResults((items) => items.map((item) => item.id === note.id ? { ...item, is_starred: data.note.is_starred } : item));
   }
   async function setSelectedStarred(starred: boolean) {
+    if (offlineMode || !navigator.onLine) throw new Error("Star changes are unavailable offline.");
     const ids = Array.from(selected);
     for (const id of ids) {
       await api.starNote(csrf, id, starred);
@@ -1697,6 +1990,7 @@ function SettingsView({ csrf, user, updateUser, templates, initialTemplateID, se
   const [template, setTemplate] = useState<Partial<Template>>({ name: "", title_template: "Untitled", folder_template: "", body_template: "", create_once: false });
   const [templateSaving, setTemplateSaving] = useState(false);
   const [dateFormat, setDateFormat] = useState(user.date_format || "ymd_slash");
+  const [theme, setTheme] = useState<AppTheme>(themeFromValue(user.theme));
   const [profileSaving, setProfileSaving] = useState(false);
   const [storage, setStorage] = useState<"browser" | "server">("browser");
   const [passphrase, setPassphrase] = useState("");
@@ -1710,7 +2004,8 @@ function SettingsView({ csrf, user, updateUser, templates, initialTemplateID, se
 
   useEffect(() => {
     setDateFormat(user.date_format || "ymd_slash");
-  }, [user.date_format]);
+    setTheme(themeFromValue(user.theme));
+  }, [user.date_format, user.theme]);
 
   useEffect(() => {
     if (initialTemplateID === 0) {
@@ -1760,7 +2055,7 @@ function SettingsView({ csrf, user, updateUser, templates, initialTemplateID, se
   async function saveProfile() {
     setProfileSaving(true);
     try {
-      const data = await api.updateProfile(csrf, { date_format: dateFormat });
+      const data = await api.updateProfile(csrf, { date_format: dateFormat, theme });
       updateUser(data.user);
       addToast("Profile saved.");
     } finally {
@@ -1868,7 +2163,13 @@ function SettingsView({ csrf, user, updateUser, templates, initialTemplateID, se
               {dateFormatOptions.map((option) => <option value={option.value} key={option.value}>{option.label} · {option.sample}</option>)}
             </select>
           </label>
-          <button type="submit" disabled={profileSaving || dateFormat === (user.date_format || "ymd_slash")}><FloppyDiskIcon />{profileSaving ? "Saving..." : "Save profile"}</button>
+          <label>Theme
+            <select value={theme} onChange={(event) => setTheme(themeFromValue(event.target.value))}>
+              <option value="classic">Classic</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+          <button type="submit" disabled={profileSaving || (dateFormat === (user.date_format || "ymd_slash") && theme === themeFromValue(user.theme))}><FloppyDiskIcon />{profileSaving ? "Saving..." : "Save profile"}</button>
         </form>
       </section>
       <section className="panel template-editor-panel">
@@ -2166,6 +2467,10 @@ function pad2(value: number) {
   return String(value).padStart(2, "0");
 }
 
+function themeFromValue(value: string | null | undefined): AppTheme {
+  return value === "dark" ? "dark" : "classic";
+}
+
 function formatDateTime(value: string) {
   const time = Date.parse(value || "");
   if (!Number.isFinite(time)) return "";
@@ -2177,6 +2482,46 @@ function folderTitle(folder: string) {
   if (folder === "__starred") return "Starred";
   if (!folder) return "All Notes";
   return folder === "/" ? "All Notes" : folder;
+}
+
+function paginate<T>(items: T[], page: number, pageSize: number) {
+  const start = Math.max(0, page - 1) * pageSize;
+  return items.slice(start, start + pageSize);
+}
+
+function translatePendingOperation(edit: PendingOperation, replacements: Map<number, { note: Note; version: NoteVersion }>) {
+  if (edit.op === "create") return edit;
+  const replacement = replacements.get(edit.note_id);
+  if (!replacement) return edit;
+  return { ...edit, note_id: replacement.note.id, base_version_id: replacement.version.id };
+}
+
+async function offlineSearch(data: SyncBootstrap, query: string, unlock: SecurityUnlock | null, titleCache: Map<number, string>) {
+  const needle = searchHighlightTerm(query).toLowerCase() || query.toLowerCase();
+  if (!needle) return [];
+  const results: NoteSummary[] = [];
+  for (const item of data.notes || []) {
+    const note = item.note;
+    const version = item.version;
+    let title = note.title || "";
+    let body = note.is_encrypted ? "" : version.content || "";
+    if (note.is_encrypted && unlock) {
+      try {
+        title = looksEncrypted(note.title) ? await decryptText(note.title, unlock.privateKeyArmored, unlock.passphrase) : note.title;
+        body = looksEncrypted(version.content) ? await decryptText(version.content, unlock.privateKeyArmored, unlock.passphrase) : version.content;
+        if (title) titleCache.set(note.id, title);
+      } catch {
+        body = "";
+      }
+    } else if (note.is_encrypted && looksEncrypted(title)) {
+      title = "";
+    }
+    const haystack = `${title}\n${note.folder_path || "/"}\n${body}`.toLowerCase();
+    if (haystack.includes(needle)) {
+      results.push({ ...note, title: title || note.title, preview: note.is_encrypted ? "Encrypted note" : version.content });
+    }
+  }
+  return results.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
 }
 
 function highlightPreview(preview: string, query: string) {
@@ -2337,6 +2682,10 @@ function preserveUnlockedTitles(items: NoteSummary[], titleCache: Map<number, st
     return { ...item, title };
   });
   return changed ? next : items;
+}
+
+function reblindEncryptedSummaries(items: NoteSummary[]) {
+  return (items || []).map((item) => item.is_encrypted ? { ...item, title: "Encrypted note", preview: "Encrypted note" } : item);
 }
 
 async function decryptSummaryTitles(items: NoteSummary[], unlock: SecurityUnlock, titleCache: Map<number, string>) {

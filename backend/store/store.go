@@ -379,14 +379,22 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	return users, rows.Err()
 }
 
-func (s *Store) UpdateUserPreferences(ctx context.Context, userID int64, dateFormat string) (User, error) {
+func (s *Store) UpdateUserPreferences(ctx context.Context, userID int64, dateFormat, theme string) (User, error) {
 	dateFormat = strings.TrimSpace(dateFormat)
 	switch dateFormat {
 	case "ymd_slash", "mdy_slash", "dmy_slash", "iso", "long":
 	default:
 		return User{}, errors.New("unsupported date format")
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET date_format = ?, updated_at = ? WHERE id = ?`, dateFormat, nowUnix(), userID)
+	theme = strings.TrimSpace(theme)
+	switch theme {
+	case "", "classic":
+		theme = "classic"
+	case "dark":
+	default:
+		return User{}, errors.New("unsupported theme")
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET date_format = ?, theme = ?, updated_at = ? WHERE id = ?`, dateFormat, theme, nowUnix(), userID)
 	if err != nil {
 		return User{}, err
 	}
@@ -830,6 +838,62 @@ func (s *Store) CreateNoteWithContent(ctx context.Context, userID int64, title, 
 	return s.CreateNoteWithContentAt(ctx, userID, title, folder, content, time.Now().UTC())
 }
 
+func (s *Store) CreateNoteWithClientID(ctx context.Context, userID int64, title, folder, content, header, clientID string, encrypted bool) (Note, NoteVersion, bool, error) {
+	clientID = strings.TrimSpace(clientID)
+	if clientID != "" {
+		var noteID int64
+		err := s.db.QueryRowContext(ctx, `SELECT nv.note_id FROM note_versions nv JOIN notes n ON n.id = nv.note_id WHERE n.owner_user_id = ? AND nv.client_id = ? ORDER BY nv.id LIMIT 1`, userID, clientID).Scan(&noteID)
+		if err == nil {
+			note, version, err := s.GetNote(ctx, userID, noteID)
+			return note, version, true, err
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Note{}, NoteVersion{}, false, err
+		}
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "Untitled"
+	}
+	folder = normalizeFolder(folder)
+	if strings.TrimSpace(header) == "" {
+		header = "{}"
+	}
+	ts := nowUnix()
+	slug, err := s.uniqueSlug(ctx, "notes")
+	if err != nil {
+		return Note{}, NoteVersion{}, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Note{}, NoteVersion{}, false, err
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO notes (owner_user_id, folder_path, title, slug, is_encrypted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, userID, folder, title, slug, boolInt(encrypted), ts, ts)
+	if err != nil {
+		_ = tx.Rollback()
+		return Note{}, NoteVersion{}, false, err
+	}
+	noteID, _ := res.LastInsertId()
+	versionID, err := insertVersion(ctx, tx, noteID, userID, content, header, 0, clientID, false)
+	if err != nil {
+		_ = tx.Rollback()
+		return Note{}, NoteVersion{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE notes SET current_version_id = ? WHERE id = ?`, versionID, noteID); err != nil {
+		_ = tx.Rollback()
+		return Note{}, NoteVersion{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO folders (user_id, path, created_at, updated_at) VALUES (?, ?, ?, ?)`, userID, folder, ts, ts); err != nil {
+		_ = tx.Rollback()
+		return Note{}, NoteVersion{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Note{}, NoteVersion{}, false, err
+	}
+	note, version, err := s.GetNote(ctx, userID, noteID)
+	return note, version, false, err
+}
+
 func (s *Store) CreateNoteWithContentAt(ctx context.Context, userID int64, title, folder, content string, timestamp time.Time) (Note, NoteVersion, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -1133,6 +1197,50 @@ func (s *Store) ListNoteSummaries(ctx context.Context, userID int64, folder stri
 			n.Preview = previewText(n.Preview)
 		}
 		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListCurrentNotes(ctx context.Context, userID int64) ([]CurrentNote, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner_user_id,
+		CASE WHEN n.owner_user_id = ? THEN n.folder_path ELSE COALESCE(NULLIF(us.folder_path, ''), n.folder_path) END,
+		n.title, n.slug, n.current_version_id, n.is_encrypted,
+		EXISTS(SELECT 1 FROM note_shares sx WHERE sx.note_id = n.id),
+		COALESCE(ns.permission, ''),
+		CASE WHEN n.owner_user_id = ? THEN n.trashed_at ELSE COALESCE(us.trashed_at, 0) END,
+		COALESCE(us.starred_at, 0),
+		n.created_at, n.updated_at,
+		nv.id, nv.note_id, nv.user_id, nv.content_blob, nv.header_json, nv.body_sha256, nv.base_version_id, nv.client_id, nv.conflicted, nv.created_at
+		FROM notes n
+		JOIN note_versions nv ON nv.id = n.current_version_id
+		LEFT JOIN note_shares ns ON ns.note_id = n.id AND ns.shared_user_id = ?
+		LEFT JOIN note_user_state us ON us.note_id = n.id AND us.user_id = ?
+		WHERE CASE WHEN n.owner_user_id = ? THEN n.trashed_at ELSE COALESCE(us.trashed_at, 0) END = 0 AND (n.owner_user_id = ? OR ns.shared_user_id IS NOT NULL)
+		ORDER BY n.updated_at DESC`, userID, userID, userID, userID, userID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CurrentNote{}
+	for rows.Next() {
+		var item CurrentNote
+		var encrypted, shared, conflicted int
+		var trashed, starred, noteCreated, noteUpdated, versionCreated int64
+		var content []byte
+		if err := rows.Scan(&item.Note.ID, &item.Note.OwnerUserID, &item.Note.FolderPath, &item.Note.Title, &item.Note.Slug, &item.Note.CurrentVersionID, &encrypted, &shared, &item.Note.SharedPermission, &trashed, &starred, &noteCreated, &noteUpdated,
+			&item.Version.ID, &item.Version.NoteID, &item.Version.UserID, &content, &item.Version.HeaderJSON, &item.Version.BodySHA256, &item.Version.BaseVersionID, &item.Version.ClientID, &conflicted, &versionCreated); err != nil {
+			return nil, err
+		}
+		item.Note.IsEncrypted = encrypted != 0
+		item.Note.IsShared = shared != 0
+		item.Note.IsStarred = starred != 0
+		item.Note.TrashedAt = unixTime(trashed)
+		item.Note.CreatedAt = unixTime(noteCreated)
+		item.Note.UpdatedAt = unixTime(noteUpdated)
+		item.Version.Content = string(content)
+		item.Version.Conflicted = conflicted != 0
+		item.Version.CreatedAt = unixTime(versionCreated)
+		out = append(out, item)
 	}
 	return out, rows.Err()
 }

@@ -1,4 +1,4 @@
-import type { Asset, BackupExport, Bootstrap, EncryptionKey, FolderRecord, Note, NoteSummary, NoteVersion, Share, Template, User } from "./types";
+import type { Asset, BackupExport, Bootstrap, EncryptionKey, FolderRecord, Note, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
 
 type PageResponse = { notes: NoteSummary[]; page: number; page_size: number; has_more: boolean };
 
@@ -48,7 +48,7 @@ export const api = {
   logout: (csrf: string) => postJSON<{ ok: boolean }>("/api/logout", csrf),
   adminUsers: () => getJSON<{ users: User[] }>("/api/admin/users"),
   users: () => getJSON<{ users: User[] }>("/api/users"),
-  updateProfile: (csrf: string, body: { date_format: string }) => putJSON<{ user: User }>("/api/profile", csrf, body),
+  updateProfile: (csrf: string, body: { date_format: string; theme?: string }) => putJSON<{ user: User }>("/api/profile", csrf, body),
   createUser: (csrf: string, body: { email: string; name: string; password: string; is_admin: boolean }) => postJSON<{ user: User }>("/api/admin/users", csrf, body),
   notes: (folder = "", page = 1) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ folder, page: String(page) })}`),
   trash: (page = 1) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ trash: "1", page: String(page) })}`),
@@ -92,6 +92,7 @@ export const api = {
   backups: () => getJSON<{ backups: BackupExport[] }>("/api/backups"),
   startBackup: (csrf: string) => postJSON<{ backup: BackupExport }>("/api/backups", csrf),
   search: (q: string, page = 1) => getJSON<PageResponse & { query: string }>(`/api/search?${new URLSearchParams({ q, page: String(page) })}`),
+  syncBootstrap: () => getJSON<SyncBootstrap>("/api/sync/bootstrap"),
   syncPush: (csrf: string, edits: unknown[]) => postJSON<{ results: unknown[] }>("/api/sync/push", csrf, { edits })
 };
 

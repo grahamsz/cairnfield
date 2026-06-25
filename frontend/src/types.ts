@@ -46,6 +46,11 @@ export type NoteSummary = Note & {
   preview: string;
 };
 
+export type SyncNote = {
+  note: Note;
+  version: NoteVersion;
+};
+
 export type Asset = {
   id: number;
   slug: string;
@@ -101,6 +106,12 @@ export type Bootstrap = {
   csrf: string;
   templates: Template[];
   auth_providers?: AuthProvider[];
+};
+
+export type SyncBootstrap = {
+  notes: SyncNote[];
+  folders: FolderRecord[];
+  server_time: string;
 };
 
 export type AuthProvider = {

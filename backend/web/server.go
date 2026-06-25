@@ -382,11 +382,12 @@ func (s *Server) apiProfile(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		var body struct {
 			DateFormat string `json:"date_format"`
+			Theme      string `json:"theme"`
 		}
 		if !decodeJSON(w, r, &body) {
 			return
 		}
-		user, err := s.store.UpdateUserPreferences(r.Context(), cu.User.ID, body.DateFormat)
+		user, err := s.store.UpdateUserPreferences(r.Context(), cu.User.ID, body.DateFormat, body.Theme)
 		if err != nil {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
@@ -1135,12 +1136,17 @@ func (s *Server) apiSyncBootstrap(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	notes, err := s.store.ListNoteSummaries(r.Context(), cu.User.ID, "", 100, 0)
+	notes, err := s.store.ListCurrentNotes(r.Context(), cu.User.ID)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"notes": notes, "server_time": time.Now().UTC().Format(time.RFC3339)})
+	folders, err := s.store.ListFolders(r.Context(), cu.User.ID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"notes": notes, "folders": folders, "server_time": time.Now().UTC().Format(time.RFC3339)})
 }
 
 func (s *Server) apiSyncPush(w http.ResponseWriter, r *http.Request) {
@@ -1150,6 +1156,7 @@ func (s *Server) apiSyncPush(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Edits []struct {
+			Op            string `json:"op"`
 			NoteID        int64  `json:"note_id"`
 			BaseVersionID int64  `json:"base_version_id"`
 			Title         string `json:"title"`
@@ -1166,15 +1173,25 @@ func (s *Server) apiSyncPush(w http.ResponseWriter, r *http.Request) {
 	}
 	var results []map[string]any
 	for _, edit := range body.Edits {
+		if edit.Op == "create" {
+			note, version, reused, err := s.store.CreateNoteWithClientID(r.Context(), cu.User.ID, edit.Title, edit.FolderPath, edit.Content, edit.HeaderJSON, edit.ClientID, edit.Encrypted)
+			if err != nil {
+				results = append(results, map[string]any{"client_id": edit.ClientID, "note_id": edit.NoteID, "op": "create", "error": err.Error()})
+				continue
+			}
+			s.indexCurrent(r.Context(), note, version)
+			results = append(results, map[string]any{"op": "create", "client_id": edit.ClientID, "note_id": edit.NoteID, "note": note, "version": version, "reused": reused})
+			continue
+		}
 		note, version, conflict, err := s.store.SaveNote(r.Context(), cu.User.ID, edit.NoteID, edit.BaseVersionID, edit.Title, edit.FolderPath, edit.Content, edit.HeaderJSON, edit.ClientID, edit.Encrypted, !edit.Autosave)
 		if err != nil {
-			results = append(results, map[string]any{"note_id": edit.NoteID, "error": err.Error()})
+			results = append(results, map[string]any{"op": "update", "note_id": edit.NoteID, "client_id": edit.ClientID, "error": err.Error()})
 			continue
 		}
 		if !conflict {
 			s.indexCurrent(r.Context(), note, version)
 		}
-		results = append(results, map[string]any{"note": note, "version": version, "conflict": conflict})
+		results = append(results, map[string]any{"op": "update", "note_id": edit.NoteID, "client_id": edit.ClientID, "note": note, "version": version, "conflict": conflict})
 	}
 	writeJSON(w, map[string]any{"results": results})
 }

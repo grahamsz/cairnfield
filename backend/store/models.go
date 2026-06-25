@@ -73,6 +73,11 @@ type NoteSummary struct {
 	Preview string `json:"preview"`
 }
 
+type CurrentNote struct {
+	Note    Note        `json:"note"`
+	Version NoteVersion `json:"version"`
+}
+
 type Template struct {
 	ID             int64     `json:"id"`
 	UserID         int64     `json:"user_id"`
