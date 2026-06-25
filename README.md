@@ -4,6 +4,8 @@ cairnfield is a lightweight, self-hosted notes app meant to cover the simple
 parts of an Obsidian-style workflow without needing a desktop sync setup. It is
 built for markdown notes, folders, attachments, search, and private hosting.
 
+![cairnfield screenshot](screenshot.png)
+
 ## Features
 
 - Markdown note editing with folders
