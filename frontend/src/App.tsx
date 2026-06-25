@@ -747,6 +747,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
   const lastUnlockedSnapshotRef = useRef<EditorSnapshot | null>(null);
   const [assetURLMap, setAssetURLMap] = useState<Map<string, string>>(() => new Map());
   const assetURLMapRef = useRef<Map<string, string>>(new Map());
+  const assetURLMapNoteIDRef = useRef(0);
   const encryptedAssetURLKey = useMemo(() => {
     if (!activeNote?.is_encrypted || !plainUnlocked || !securityUnlock || !content) return "";
     return encryptedAssetURLs(content).join("\n");
@@ -754,11 +755,18 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
 
   useEffect(() => {
     const noteEncrypted = Boolean(activeNote?.is_encrypted);
+    const noteID = activeNote?.id || 0;
+    if (assetURLMapNoteIDRef.current !== noteID) {
+      revokeAssetURLMap(assetURLMapRef.current);
+      assetURLMapRef.current = new Map();
+      assetURLMapNoteIDRef.current = noteID;
+      setAssetURLMap(new Map());
+    }
     const contentValue = version?.content || "";
     const unlockedContent = noteEncrypted && !looksEncrypted(contentValue);
     const titleValue = noteEncrypted && !unlockedContent ? "Encrypted note" : activeNote?.title || "";
-    loadedNoteID.current = activeNote?.id || 0;
-    skipDirtyForLoadedNote.current = activeNote?.id || 0;
+    loadedNoteID.current = noteID;
+    skipDirtyForLoadedNote.current = noteID;
     setTitle(titleValue);
     setFolder(activeNote?.folder_path || "/");
     setEncrypted(noteEncrypted);
@@ -770,9 +778,6 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
     if (activeNote?.id) savedSignaturesRef.current.set(activeNote.id, signature);
     setStatus("idle");
     setMode("rich");
-    revokeAssetURLMap(assetURLMapRef.current);
-    assetURLMapRef.current = new Map();
-    setAssetURLMap(new Map());
   }, [activeNote?.id, activeNote?.folder_path, activeNote?.is_encrypted, activeNote?.title, version?.content]);
 
   useEffect(() => {
@@ -1000,10 +1005,10 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       const encryptedData = await encryptBytes(await file.arrayBuffer(), encryptionKey);
       const encryptedFile = new File([bytesToArrayBuffer(encryptedData)], file.name, { type: "application/octet-stream" });
       const data = await api.uploadAsset(csrf, encryptedFile, activeNote.id, true, file.type || "application/octet-stream");
-      const objectURL = URL.createObjectURL(file);
+      const objectURL = await fileDataURL(file);
       const next = new Map(assetURLMapRef.current);
       const previous = next.get(data.url);
-      if (previous) URL.revokeObjectURL(previous);
+      if (previous?.startsWith("blob:")) URL.revokeObjectURL(previous);
       next.set(data.url, objectURL);
       assetURLMapRef.current = next;
       setAssetURLMap(new Map(next));
@@ -2368,14 +2373,16 @@ function encryptedAssetURLs(markdown: string) {
 }
 
 function revokeAssetURLMap(map: Map<string, string>) {
-  map.forEach((url) => URL.revokeObjectURL(url));
+  map.forEach((url) => {
+    if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+  });
 }
 
 function pruneAssetURLMap(map: Map<string, string>, keep: Set<string>) {
   const next = new Map<string, string>();
   map.forEach((objectURL, sourceURL) => {
     if (keep.has(sourceURL)) next.set(sourceURL, objectURL);
-    else URL.revokeObjectURL(objectURL);
+    else if (objectURL.startsWith("blob:")) URL.revokeObjectURL(objectURL);
   });
   return next;
 }
@@ -2410,6 +2417,15 @@ function bytesToArrayBuffer(bytes: Uint8Array) {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
+}
+
+function fileDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Could not read image preview"));
+    reader.onerror = () => reject(reader.error || new Error("Could not read image preview"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function looksEncrypted(value: string) {
