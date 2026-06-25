@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test-and-image:
+    name: Test And Build Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v5
+
+      - name: Set Build Metadata
+        id: build-meta
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="latest"
+          fi
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cairnfield"
+          {
+            echo "CAIRNFIELD_VERSION=$version"
+            echo "CAIRNFIELD_BUILD_DATE=$build_date"
+            echo "CAIRNFIELD_IMAGE=$image"
+          } >> "$GITHUB_ENV"
+          {
+            echo "version=$version"
+            echo "build_date=$build_date"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set Up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set Up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Build Frontend
+        run: npm run build
+
+      - name: Run Go Tests
+        run: go test ./...
+
+      - name: Build Docker Image
+        run: |
+          docker build \
+            --label "org.opencontainers.image.title=cairnfield" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.created=${CAIRNFIELD_BUILD_DATE}" \
+            --label "org.opencontainers.image.version=${CAIRNFIELD_VERSION}" \
+            -t "${CAIRNFIELD_IMAGE}:${CAIRNFIELD_VERSION}" \
+            .
+
+      - name: Log In To GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish Docker Image
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push "${CAIRNFIELD_IMAGE}:${CAIRNFIELD_VERSION}"
+
+      - name: Docker Image Summary
+        run: |
+          {
+            echo "### Docker Image"
+            echo
+            echo "Image: \`${CAIRNFIELD_IMAGE}:${CAIRNFIELD_VERSION}\`"
+            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+              echo "Published: no (pull request build)"
+            else
+              echo "Published: yes"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
