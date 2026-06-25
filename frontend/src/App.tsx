@@ -453,13 +453,13 @@ export default function App() {
       let data: { notes: NoteSummary[]; page: number; has_more: boolean };
       try {
         if (offlineMode || !navigator.onLine) throw new Error("offline");
-        data = path === "__trash" ? await api.trash(page) : path === "__starred" ? await api.starred(page) : await api.notes(path, page);
+        data = path === "__trash" ? await api.trash(page) : path === "__starred" ? await api.starred(page) : await api.notes(path, page, true);
         setOfflineMode(false);
       } catch (err) {
         if (path === "__trash") throw err;
         const cached = await loadOfflineSync();
         const all = (cached.notes || []).map(noteSummaryFromSync)
-          .filter((note) => path === "__starred" ? note.is_starred : !path || path === "/" ? true : normalizeFolderPath(note.folder_path || "/") === normalizeFolderPath(path))
+          .filter((note) => path === "__starred" ? note.is_starred : !path || path === "/" ? true : isInFolderTree(note.folder_path || "/", path))
           .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
         data = { notes: paginate(all, page, 50), page, has_more: all.length > page * 50 };
         setOfflineMode(true);
@@ -2359,6 +2359,12 @@ function normalizeFolderPath(path: string) {
   const clean = (path || "/").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
   const withSlash = clean.startsWith("/") ? clean : `/${clean}`;
   return withSlash.length > 1 ? withSlash.replace(/\/+$/, "") : "/";
+}
+
+function isInFolderTree(notePath: string, folderPath: string) {
+  const noteFolder = normalizeFolderPath(notePath);
+  const folder = normalizeFolderPath(folderPath);
+  return folder === "/" || noteFolder === folder || noteFolder.startsWith(`${folder}/`);
 }
 
 function currentNoteTargetFolder(folder: string) {

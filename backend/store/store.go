@@ -1145,7 +1145,7 @@ func (s *Store) ListNotes(ctx context.Context, userID int64, folder string, limi
 	return out, rows.Err()
 }
 
-func (s *Store) ListNoteSummaries(ctx context.Context, userID int64, folder string, limit, offset int) ([]NoteSummary, error) {
+func (s *Store) ListNoteSummaries(ctx context.Context, userID int64, folder string, includeDescendants bool, limit, offset int) ([]NoteSummary, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -1153,9 +1153,14 @@ func (s *Store) ListNoteSummaries(ctx context.Context, userID int64, folder stri
 	whereFolder := ""
 	args := []any{userID, userID, userID, userID, userID, userID}
 	if folder != "/" {
-		whereFolder = " AND CASE WHEN n.owner_user_id = ? THEN n.folder_path ELSE COALESCE(NULLIF(us.folder_path, ''), n.folder_path) END = ?"
-		args = append(args, userID)
-		args = append(args, folder)
+		folderExpr := "CASE WHEN n.owner_user_id = ? THEN n.folder_path ELSE COALESCE(NULLIF(us.folder_path, ''), n.folder_path) END"
+		if includeDescendants {
+			whereFolder = " AND (" + folderExpr + " = ? OR " + folderExpr + " LIKE ?)"
+			args = append(args, userID, folder, userID, folder+"/%")
+		} else {
+			whereFolder = " AND " + folderExpr + " = ?"
+			args = append(args, userID, folder)
+		}
 	}
 	args = append(args, limit, offset)
 	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner_user_id,

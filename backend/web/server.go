@@ -448,7 +448,8 @@ func (s *Server) apiNotes(w http.ResponseWriter, r *http.Request) {
 		} else if r.URL.Query().Get("starred") == "1" {
 			notes, err = s.store.ListStarredSummaries(r.Context(), cu.User.ID, pageSize+1, (page-1)*pageSize)
 		} else {
-			notes, err = s.store.ListNoteSummaries(r.Context(), cu.User.ID, r.URL.Query().Get("folder"), pageSize+1, (page-1)*pageSize)
+			includeDescendants := r.URL.Query().Get("descendants") == "1"
+			notes, err = s.store.ListNoteSummaries(r.Context(), cu.User.ID, r.URL.Query().Get("folder"), includeDescendants, pageSize+1, (page-1)*pageSize)
 		}
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, err.Error())

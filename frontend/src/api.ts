@@ -51,7 +51,7 @@ export const api = {
   users: () => getJSON<{ users: User[] }>("/api/users"),
   updateProfile: (csrf: string, body: { date_format: string; theme?: string }) => putJSON<{ user: User }>("/api/profile", csrf, body),
   createUser: (csrf: string, body: { email: string; name: string; password: string; is_admin: boolean }) => postJSON<{ user: User }>("/api/admin/users", csrf, body),
-  notes: (folder = "", page = 1) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ folder, page: String(page) })}`),
+  notes: (folder = "", page = 1, descendants = false) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ folder, page: String(page), ...(descendants ? { descendants: "1" } : {}) })}`),
   trash: (page = 1) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ trash: "1", page: String(page) })}`),
   starred: (page = 1) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ starred: "1", page: String(page) })}`),
   createNote: (csrf: string, templateID = 0, selectedFolder = "/") => postJSON<{ note: Note; version: NoteVersion; reused: boolean }>("/api/notes", csrf, { template_id: templateID, selected_folder: selectedFolder }),
