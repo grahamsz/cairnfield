@@ -28,3 +28,8 @@ docker run -d \
 ```
 
 Then open `http://localhost:8080` and create the first admin account.
+
+## License
+
+cairnfield is licensed under the GNU Affero General Public License v3.0 only.
+See [LICENSE](LICENSE).
