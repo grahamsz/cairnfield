@@ -22,6 +22,8 @@ export type FolderRecord = {
   id: number;
   user_id: number;
   path: string;
+  display_mode?: "list" | "gallery" | "moodboard";
+  sort_mode?: "newest" | "oldest" | "alphabetical" | "custom";
   created_at: string;
   updated_at: string;
 };
@@ -44,11 +46,27 @@ export type Note = {
 
 export type NoteSummary = Note & {
   preview: string;
+  header_json?: string;
 };
 
 export type SyncNote = {
   note: Note;
   version: NoteVersion;
+};
+
+export type NoteDetail = {
+  note: Note;
+  version: NoteVersion;
+  shares: Share[];
+  assets?: Asset[];
+};
+
+export type MoodboardItem = {
+  note: Note;
+  version: NoteVersion;
+  asset?: Asset;
+  preview_asset?: Asset;
+  position: number;
 };
 
 export type Asset = {
@@ -98,6 +116,15 @@ export type EncryptionKey = {
   storage_mode: string;
   is_default: boolean;
   created_at: string;
+};
+
+export type APIToken = {
+  id: number;
+  user_id: number;
+  name: string;
+  created_at: string;
+  last_used_at?: string;
+  revoked_at?: string;
 };
 
 export type Bootstrap = {

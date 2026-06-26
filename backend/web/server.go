@@ -22,6 +22,7 @@ import (
 
 	"cairnfield/backend/auth"
 	"cairnfield/backend/blob"
+	"cairnfield/backend/document"
 	"cairnfield/backend/oidc"
 	"cairnfield/backend/search"
 	"cairnfield/backend/store"
@@ -153,7 +154,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	r = r.WithContext(ctx)
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
-	if r.Method != http.MethodGet && !s.validCSRF(r) {
+	if r.Method != http.MethodGet && !s.validCSRF(r) && !isClipAPIPath(path) {
 		writeAPIError(w, http.StatusForbidden, "invalid CSRF token")
 		return
 	}
@@ -168,6 +169,20 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiLogout(w, r)
 	case path == "profile":
 		s.apiProfile(w, r)
+	case path == "tokens":
+		s.apiTokens(w, r)
+	case strings.HasPrefix(path, "tokens/"):
+		s.apiTokenPath(w, r, strings.TrimPrefix(path, "tokens/"))
+	case path == "extension/zip":
+		s.apiExtensionZip(w, r)
+	case path == "clip/bootstrap":
+		s.apiClipBootstrap(w, r)
+	case path == "clip/html":
+		s.apiClipHTML(w, r)
+	case path == "clip/pdf":
+		s.apiClipPDF(w, r)
+	case path == "clip/image":
+		s.apiClipImage(w, r)
 	case path == "oidc/login":
 		s.apiOIDCLogin(w, r)
 	case path == "oidc/callback":
@@ -188,6 +203,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiFolders(w, r)
 	case path == "folders/move":
 		s.apiMoveFolder(w, r)
+	case path == "folders/mode":
+		s.apiFolderMode(w, r)
+	case path == "moodboard":
+		s.apiMoodboard(w, r)
+	case path == "moodboard/order":
+		s.apiMoodboardOrder(w, r)
 	case path == "import":
 		s.apiImport(w, r)
 	case path == "templates":
@@ -211,6 +232,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func isClipAPIPath(path string) bool {
+	return path == "clip/bootstrap" || path == "clip/html" || path == "clip/pdf" || path == "clip/image"
+}
+
 func (s *Server) validCSRF(r *http.Request) bool {
 	cu := current(r)
 	header := r.Header.Get("X-CSRF-Token")
@@ -224,6 +249,26 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (currentUse
 		return currentUser{}, false
 	}
 	return cu, true
+}
+
+func (s *Server) requireBearerAuth(w http.ResponseWriter, r *http.Request) (currentUser, bool) {
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		writeAPIError(w, http.StatusUnauthorized, "bearer token required")
+		return currentUser{}, false
+	}
+	raw := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	if raw == "" {
+		writeAPIError(w, http.StatusUnauthorized, "bearer token required")
+		return currentUser{}, false
+	}
+	user, _, err := s.store.UserByAPITokenHash(r.Context(), store.TokenHash(raw))
+	if err != nil {
+		writeAPIError(w, http.StatusUnauthorized, "invalid bearer token")
+		return currentUser{}, false
+	}
+	return currentUser{User: user}, true
 }
 
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (currentUser, bool) {
@@ -432,6 +477,170 @@ func (s *Server) apiProfile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) apiTokens(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		tokens, err := s.store.ListAPITokens(r.Context(), cu.User.ID)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"tokens": apiTokenViews(tokens)})
+	case http.MethodPost:
+		var body struct {
+			Name string `json:"name"`
+		}
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+		opaque, err := auth.NewOpaqueToken()
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		raw := "cairnfield_" + opaque
+		token, err := s.store.CreateAPIToken(r.Context(), cu.User.ID, body.Name, store.TokenHash(raw))
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"token": apiTokenView(token), "raw_token": raw})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+type apiTokenResponse struct {
+	ID         int64      `json:"id"`
+	UserID     int64      `json:"user_id"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+}
+
+func apiTokenViews(tokens []store.APIToken) []apiTokenResponse {
+	out := make([]apiTokenResponse, 0, len(tokens))
+	for _, token := range tokens {
+		out = append(out, apiTokenView(token))
+	}
+	return out
+}
+
+func apiTokenView(token store.APIToken) apiTokenResponse {
+	out := apiTokenResponse{ID: token.ID, UserID: token.UserID, Name: token.Name, CreatedAt: token.CreatedAt}
+	if !token.LastUsedAt.IsZero() {
+		lastUsed := token.LastUsedAt
+		out.LastUsedAt = &lastUsed
+	}
+	if !token.RevokedAt.IsZero() {
+		revoked := token.RevokedAt
+		out.RevokedAt = &revoked
+	}
+	return out
+}
+
+func (s *Server) apiTokenPath(w http.ResponseWriter, r *http.Request, tail string) {
+	cu, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(strings.Trim(tail, "/"), 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	if err := s.store.RevokeAPIToken(r.Context(), cu.User.ID, id); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) apiExtensionZip(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	dir, err := extensionDir(s.staticDir)
+	if err != nil {
+		writeAPIError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="cairnfield-clipper-extension.zip"`)
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+	err = filepath.WalkDir(dir, func(filePath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, filePath)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if strings.HasPrefix(rel, ".") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = rel
+		header.Method = zip.Deflate
+		part, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(filePath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(part, f)
+		return err
+	})
+	if err != nil {
+		// Headers may already be sent, but this keeps tests and early failures visible.
+		return
+	}
+}
+
+func extensionDir(staticDir string) (string, error) {
+	candidates := []string{}
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "extension"), filepath.Join(filepath.Dir(cwd), "extension"))
+	}
+	if staticDir != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(staticDir), "extension"), filepath.Join(staticDir, "extension"))
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(filepath.Join(candidate, "manifest.json")); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("extension files are not available on this server")
+}
+
 func (s *Server) apiNotes(w http.ResponseWriter, r *http.Request) {
 	cu, ok := s.requireAuth(w, r)
 	if !ok {
@@ -501,7 +710,8 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 				return
 			}
 			shares, _ := s.store.ListShares(r.Context(), note.OwnerUserID, note.ID)
-			writeJSON(w, map[string]any{"note": note, "version": version, "shares": shares})
+			assets, _ := s.store.ListAssetsForNote(r.Context(), cu.User.ID, note.ID)
+			writeJSON(w, map[string]any{"note": note, "version": version, "shares": shares, "assets": assets})
 		case http.MethodPut:
 			var body struct {
 				Title         string `json:"title"`
@@ -725,6 +935,238 @@ func (s *Server) apiMoveFolder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"folders": folders})
 }
 
+func (s *Server) apiFolderMode(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Path     string `json:"path"`
+		Mode     string `json:"mode"`
+		SortMode string `json:"sort_mode"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	folder, err := s.store.SetFolderSettings(r.Context(), cu.User.ID, body.Path, body.Mode, body.SortMode)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"folder": folder})
+}
+
+func (s *Server) apiMoodboard(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	folder := r.URL.Query().Get("folder")
+	items, err := s.store.ListMoodboardItems(r.Context(), cu.User.ID, folder, r.URL.Query().Get("descendants") == "1")
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"items": items, "folder": normalizeFolderPath(folder)})
+}
+
+func (s *Server) apiMoodboardOrder(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Folder  string  `json:"folder"`
+		NoteIDs []int64 `json:"note_ids"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := s.store.SaveMoodboardOrder(r.Context(), cu.User.ID, body.Folder, body.NoteIDs); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	items, err := s.store.ListMoodboardItems(r.Context(), cu.User.ID, body.Folder, false)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"items": items})
+}
+
+type clipMetadata struct {
+	Title           string `json:"title"`
+	SourceURL       string `json:"source_url"`
+	PageURL         string `json:"page_url"`
+	SelectionText   string `json:"selection_text"`
+	SearchText      string `json:"search_text"`
+	FolderPath      string `json:"folder_path"`
+	DestinationKind string `json:"destination_kind"`
+	CapturedAt      string `json:"captured_at"`
+}
+
+type clipUploadFile struct {
+	Filename    string
+	ContentType string
+	Data        []byte
+}
+
+func (s *Server) apiClipBootstrap(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireBearerAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	folders, err := s.store.ListFolders(r.Context(), cu.User.ID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	boardFolders := []store.Folder{}
+	for _, folder := range folders {
+		if folder.DisplayMode == "moodboard" {
+			boardFolders = append(boardFolders, folder)
+		}
+	}
+	writeJSON(w, map[string]any{
+		"user":          cu.User,
+		"folders":       folders,
+		"board_folders": boardFolders,
+		"app_version":   "dev",
+	})
+}
+
+func (s *Server) apiClipHTML(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireBearerAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.blobs == nil {
+		writeAPIError(w, http.StatusInternalServerError, "blob storage is not configured")
+		return
+	}
+	meta, data, filename, err := readClipUpload(r, "html", 50<<20)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if filename == "" {
+		filename = "clip.html"
+	}
+	if !strings.HasSuffix(strings.ToLower(filename), ".html") && !strings.HasSuffix(strings.ToLower(filename), ".htm") {
+		filename += ".html"
+	}
+	preview, err := readOptionalClipUpload(r, "preview", 8<<20)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	note, version, asset, err := s.createHTMLClip(r.Context(), cu.User.ID, meta, filename, data, preview)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"note": note, "version": version, "asset": asset, "url": s.appPath(fmt.Sprintf("/notes/%s", note.Slug))})
+}
+
+func (s *Server) apiClipPDF(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireBearerAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.blobs == nil {
+		writeAPIError(w, http.StatusInternalServerError, "blob storage is not configured")
+		return
+	}
+	meta, data, filename, err := readClipUpload(r, "pdf", 80<<20)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if filename == "" {
+		filename = "clip.pdf"
+	}
+	if !strings.HasSuffix(strings.ToLower(filename), ".pdf") {
+		filename += ".pdf"
+	}
+	contentType := r.FormValue("content_type")
+	if contentType == "" {
+		contentType = contentTypeForFile(filename, data)
+	}
+	if !strings.EqualFold(contentType, "application/pdf") && !strings.EqualFold(contentType, "application/x-pdf") {
+		writeAPIError(w, http.StatusBadRequest, "pdf upload must be a PDF")
+		return
+	}
+	preview, err := readOptionalClipUpload(r, "preview", 8<<20)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	note, version, asset, err := s.createDocumentClip(r.Context(), cu.User.ID, "pdf", meta, filename, "application/pdf", data, preview)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"note": note, "version": version, "asset": asset, "url": s.appPath(fmt.Sprintf("/notes/%s", note.Slug))})
+}
+
+func (s *Server) apiClipImage(w http.ResponseWriter, r *http.Request) {
+	cu, ok := s.requireBearerAuth(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.blobs == nil {
+		writeAPIError(w, http.StatusInternalServerError, "blob storage is not configured")
+		return
+	}
+	meta, data, filename, err := readClipUpload(r, "image", 25<<20)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	contentType := r.FormValue("content_type")
+	if contentType == "" {
+		contentType = contentTypeForFile(filename, data)
+	}
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		writeAPIError(w, http.StatusBadRequest, "image upload must be an image")
+		return
+	}
+	note, version, asset, err := s.createImageClip(r.Context(), cu.User.ID, meta, filename, contentType, data)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"note": note, "version": version, "asset": asset, "url": s.appPath(fmt.Sprintf("/notes/%s", note.Slug))})
+}
+
 func (s *Server) apiImport(w http.ResponseWriter, r *http.Request) {
 	cu, ok := s.requireAuth(w, r)
 	if !ok {
@@ -745,14 +1187,29 @@ func (s *Server) apiImport(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var preview *importArchiveFile
+	if previewFile, previewHeader, err := r.FormFile("preview"); err == nil {
+		defer previewFile.Close()
+		body, readErr := io.ReadAll(io.LimitReader(previewFile, 10<<20))
+		if readErr != nil {
+			writeAPIError(w, http.StatusBadRequest, readErr.Error())
+			return
+		}
+		preview = &importArchiveFile{Name: previewHeader.Filename, Data: body, Modified: time.Now().UTC()}
+	}
 	targetFolder := r.FormValue("folder_path")
 	imported := []store.Note{}
 	importOne := func(name string, content []byte, timestamp time.Time, archiveFiles map[string]importArchiveFile) error {
-		if !strings.EqualFold(filepath.Ext(name), ".md") {
-			return nil
-		}
 		clean := path.Clean(strings.ReplaceAll(name, "\\", "/"))
 		if clean == "." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(name), ".md") {
+			note, _, err := s.importDocumentNote(r.Context(), cu.User.ID, clean, targetFolder, content, preview, timestamp)
+			if err != nil {
+				return err
+			}
+			imported = append(imported, note)
 			return nil
 		}
 		title := strings.TrimSuffix(path.Base(clean), path.Ext(clean))
@@ -787,6 +1244,7 @@ func (s *Server) apiImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		archiveFiles := map[string]importArchiveFile{}
+		hasMarkdown := false
 		for _, zf := range zr.File {
 			if zf.FileInfo().IsDir() {
 				continue
@@ -805,9 +1263,15 @@ func (s *Server) apiImport(w http.ResponseWriter, r *http.Request) {
 			clean := path.Clean(strings.ReplaceAll(zf.Name, "\\", "/"))
 			if clean != "." && !strings.HasPrefix(clean, "../") && !strings.HasPrefix(clean, "/") {
 				archiveFiles[strings.ToLower(clean)] = importArchiveFile{Name: clean, Data: body, Modified: zf.Modified}
+				if strings.EqualFold(filepath.Ext(clean), ".md") {
+					hasMarkdown = true
+				}
 			}
 		}
 		for _, file := range archiveFiles {
+			if hasMarkdown && !strings.EqualFold(filepath.Ext(file.Name), ".md") {
+				continue
+			}
 			if err := importOne(file.Name, file.Data, file.Modified, archiveFiles); err != nil {
 				writeAPIError(w, http.StatusBadRequest, err.Error())
 				return
@@ -857,9 +1321,10 @@ func (s *Server) rewriteObsidianEmbeds(ctx context.Context, userID, noteID int64
 			firstErr = err
 			return match
 		}
+		searchText := document.SearchableText(path.Base(file.Name), contentType, file.Data)
 		asset, err := s.store.CreateAsset(ctx, store.Asset{
 			UserID: userID, NoteID: noteID, Filename: path.Base(file.Name), ContentType: contentType,
-			BlobPath: saved.Path, SHA256: saved.SHA256, Size: saved.Size,
+			BlobPath: saved.Path, SHA256: saved.SHA256, Size: saved.Size, SearchText: searchText,
 		})
 		if err != nil {
 			firstErr = err
@@ -876,6 +1341,472 @@ func (s *Server) rewriteObsidianEmbeds(ctx context.Context, userID, noteID int64
 		return content, false, firstErr
 	}
 	return rewritten, changed, nil
+}
+
+func (s *Server) importDocumentNote(ctx context.Context, userID int64, cleanName, targetFolder string, data []byte, preview *importArchiveFile, timestamp time.Time) (store.Note, store.NoteVersion, error) {
+	if s.blobs == nil {
+		return store.Note{}, store.NoteVersion{}, errors.New("blob storage is not configured")
+	}
+	contentType := contentTypeForFile(cleanName, data)
+	title := strings.TrimSuffix(path.Base(cleanName), path.Ext(cleanName))
+	if strings.TrimSpace(title) == "" {
+		title = path.Base(cleanName)
+	}
+	folder := targetFolder
+	if dir := path.Dir(cleanName); dir != "." {
+		folder = strings.TrimRight(targetFolder, "/") + "/" + dir
+	}
+	body := documentNoteMarkdown(path.Base(cleanName), contentType)
+	note, version, err := s.store.CreateNoteWithContentAt(ctx, userID, title, folder, body, timestamp)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, err
+	}
+	saved, err := s.blobs.SaveAsset(userID, path.Base(cleanName), data)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, err
+	}
+	searchText := document.SearchableText(path.Base(cleanName), contentType, data)
+	asset, err := s.store.CreateAsset(ctx, store.Asset{
+		UserID: userID, NoteID: note.ID, VersionID: version.ID, Filename: path.Base(cleanName),
+		ContentType: contentType, BlobPath: saved.Path, SHA256: saved.SHA256, Size: saved.Size,
+		SearchText: searchText,
+	})
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, err
+	}
+	var previewAsset *store.Asset
+	if preview != nil && len(preview.Data) > 0 {
+		previewName := strings.TrimSpace(preview.Name)
+		if previewName == "" {
+			previewName = strings.TrimSuffix(path.Base(cleanName), path.Ext(cleanName)) + "-preview.png"
+		}
+		previewType := contentTypeForFile(previewName, preview.Data)
+		savedPreview, err := s.blobs.SaveAsset(userID, previewName, preview.Data)
+		if err != nil {
+			return store.Note{}, store.NoteVersion{}, err
+		}
+		created, err := s.store.CreateAsset(ctx, store.Asset{
+			UserID: userID, NoteID: note.ID, VersionID: version.ID, Filename: previewName,
+			ContentType: previewType, BlobPath: savedPreview.Path, SHA256: savedPreview.SHA256, Size: savedPreview.Size,
+		})
+		if err != nil {
+			return store.Note{}, store.NoteVersion{}, err
+		}
+		previewAsset = &created
+	}
+	url := s.appPath(fmt.Sprintf("/assets/%s/%s", asset.Slug, urlPathSegment(asset.Filename)))
+	body = documentNoteMarkdownWithURL(asset.Filename, asset.ContentType, url)
+	headerJSON, err := documentNoteHeaderJSON(asset, previewAsset)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, err
+	}
+	note, version, err = s.store.ReplaceImportedNoteContentAndHeaderAt(ctx, userID, note.ID, body, headerJSON, timestamp)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, err
+	}
+	s.indexCurrent(ctx, note, version)
+	return note, version, nil
+}
+
+func documentNoteHeaderJSON(asset store.Asset, previewAsset *store.Asset) (string, error) {
+	header := map[string]any{
+		"kind": "document",
+		"asset": map[string]any{
+			"id":           asset.ID,
+			"slug":         asset.Slug,
+			"filename":     asset.Filename,
+			"content_type": asset.ContentType,
+			"size":         asset.Size,
+		},
+	}
+	if previewAsset != nil {
+		header["preview_asset"] = map[string]any{
+			"id":           previewAsset.ID,
+			"slug":         previewAsset.Slug,
+			"filename":     previewAsset.Filename,
+			"content_type": previewAsset.ContentType,
+			"size":         previewAsset.Size,
+		}
+	}
+	data, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func documentNoteMarkdown(filename, contentType string) string {
+	return documentNoteMarkdownWithURL(filename, contentType, "")
+}
+
+func documentNoteMarkdownWithURL(filename, contentType, url string) string {
+	label := strings.TrimSpace(filename)
+	if label == "" {
+		label = "Document"
+	}
+	var b strings.Builder
+	b.WriteString("# ")
+	b.WriteString(label)
+	b.WriteString("\n\n")
+	if strings.HasPrefix(contentType, "image/") && url != "" {
+		b.WriteString("![")
+		b.WriteString(label)
+		b.WriteString("](")
+		b.WriteString(url)
+		b.WriteString(")\n")
+		return b.String()
+	}
+	if url != "" {
+		b.WriteString("[")
+		b.WriteString(label)
+		b.WriteString("](")
+		b.WriteString(url)
+		b.WriteString(")\n")
+		return b.String()
+	}
+	b.WriteString(label)
+	b.WriteByte('\n')
+	return b.String()
+}
+
+func readClipUpload(r *http.Request, field string, maxBytes int64) (clipMetadata, []byte, string, error) {
+	if err := r.ParseMultipartForm(maxBytes); err != nil {
+		return clipMetadata{}, nil, "", err
+	}
+	var meta clipMetadata
+	rawMeta := strings.TrimSpace(r.FormValue("metadata"))
+	if rawMeta == "" {
+		return clipMetadata{}, nil, "", errors.New("metadata is required")
+	}
+	if err := json.Unmarshal([]byte(rawMeta), &meta); err != nil {
+		return clipMetadata{}, nil, "", errors.New("invalid metadata")
+	}
+	file, header, err := r.FormFile(field)
+	if err != nil && field != "file" {
+		file, header, err = r.FormFile("file")
+	}
+	if err != nil {
+		return clipMetadata{}, nil, "", errors.New("file is required")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return clipMetadata{}, nil, "", err
+	}
+	if int64(len(data)) > maxBytes {
+		return clipMetadata{}, nil, "", errors.New("file is too large")
+	}
+	return meta, data, path.Base(header.Filename), nil
+}
+
+func readOptionalClipUpload(r *http.Request, field string, maxBytes int64) (*clipUploadFile, error) {
+	file, header, err := r.FormFile(field)
+	if err != nil {
+		if errors.Is(err, http.ErrMissingFile) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errors.New(field + " file is too large")
+	}
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" || strings.EqualFold(contentType, "application/octet-stream") {
+		contentType = contentTypeForFile(header.Filename, data)
+	}
+	return &clipUploadFile{Filename: path.Base(header.Filename), ContentType: contentType, Data: data}, nil
+}
+
+func (s *Server) createHTMLClip(ctx context.Context, userID int64, meta clipMetadata, filename string, data []byte, preview *clipUploadFile) (store.Note, store.NoteVersion, store.Asset, error) {
+	return s.createDocumentClip(ctx, userID, "html", meta, filename, "text/html; charset=utf-8", data, preview)
+}
+
+func (s *Server) createDocumentClip(ctx context.Context, userID int64, kind string, meta clipMetadata, filename, contentType string, data []byte, preview *clipUploadFile) (store.Note, store.NoteVersion, store.Asset, error) {
+	title, folder, capturedAt, err := normalizeClipMetadata(meta, "Clipped page")
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	note, version, err := s.store.CreateNoteWithContentAt(ctx, userID, title, folder, clipPlaceholderMarkdown(title), capturedAt)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	saved, err := s.blobs.SaveAsset(userID, filename, data)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	searchText := mergedClipSearchText(document.SearchableText(filename, contentType, data), meta.SearchText)
+	asset, err := s.store.CreateAsset(ctx, store.Asset{
+		UserID: userID, NoteID: note.ID, VersionID: version.ID, Filename: filename, ContentType: contentType,
+		BlobPath: saved.Path, SHA256: saved.SHA256, Size: saved.Size, SearchText: searchText,
+	})
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	var previewAsset *store.Asset
+	if preview != nil && len(preview.Data) > 0 {
+		if !strings.HasPrefix(strings.ToLower(preview.ContentType), "image/") {
+			return store.Note{}, store.NoteVersion{}, store.Asset{}, errors.New("preview must be an image")
+		}
+		previewName := strings.TrimSpace(preview.Filename)
+		if previewName == "" || previewName == "." {
+			previewName = strings.TrimSuffix(filename, path.Ext(filename)) + "-preview.png"
+		}
+		savedPreview, err := s.blobs.SaveAsset(userID, previewName, preview.Data)
+		if err != nil {
+			return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+		}
+		created, err := s.store.CreateAsset(ctx, store.Asset{
+			UserID: userID, NoteID: note.ID, VersionID: version.ID, Filename: previewName,
+			ContentType: preview.ContentType, BlobPath: savedPreview.Path, SHA256: savedPreview.SHA256, Size: savedPreview.Size,
+		})
+		if err != nil {
+			return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+		}
+		previewAsset = &created
+	}
+	headerJSON, err := documentClipHeaderJSON(kind, asset, previewAsset, meta)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	body := htmlClipMarkdown(title, meta, capturedAt)
+	note, version, err = s.store.ReplaceImportedNoteContentAndHeaderAt(ctx, userID, note.ID, body, headerJSON, capturedAt)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	s.indexCurrent(ctx, note, version)
+	return note, version, asset, nil
+}
+
+func (s *Server) createImageClip(ctx context.Context, userID int64, meta clipMetadata, filename, contentType string, data []byte) (store.Note, store.NoteVersion, store.Asset, error) {
+	title, folder, capturedAt, err := normalizeClipMetadata(meta, "Clipped image")
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	if strings.TrimSpace(filename) == "" || filename == "." {
+		filename = "image"
+	}
+	note, version, err := s.store.CreateNoteWithContentAt(ctx, userID, title, folder, clipPlaceholderMarkdown(title), capturedAt)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	saved, err := s.blobs.SaveAsset(userID, filename, data)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	asset, err := s.store.CreateAsset(ctx, store.Asset{
+		UserID: userID, NoteID: note.ID, VersionID: version.ID, Filename: filename, ContentType: contentType,
+		BlobPath: saved.Path, SHA256: saved.SHA256, Size: saved.Size, SearchText: strings.TrimSpace(meta.SearchText),
+	})
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	assetURL := s.appPath(fmt.Sprintf("/assets/%s/%s", asset.Slug, urlPathSegment(asset.Filename)))
+	headerJSON, err := documentClipHeaderJSON("image", asset, nil, meta)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	body := imageClipMarkdown(title, meta, capturedAt, asset.Filename, assetURL)
+	note, version, err = s.store.ReplaceImportedNoteContentAndHeaderAt(ctx, userID, note.ID, body, headerJSON, capturedAt)
+	if err != nil {
+		return store.Note{}, store.NoteVersion{}, store.Asset{}, err
+	}
+	s.indexCurrent(ctx, note, version)
+	return note, version, asset, nil
+}
+
+func normalizeClipMetadata(meta clipMetadata, fallbackTitle string) (string, string, time.Time, error) {
+	title := strings.TrimSpace(meta.Title)
+	if title == "" {
+		title = fallbackTitle
+	}
+	folder := normalizeFolderPath(meta.FolderPath)
+	kind := strings.TrimSpace(meta.DestinationKind)
+	if kind == "" {
+		kind = "folder"
+	}
+	if kind != "folder" && kind != "board" {
+		return "", "", time.Time{}, errors.New("destination_kind must be folder or board")
+	}
+	capturedAt := time.Now().UTC()
+	if strings.TrimSpace(meta.CapturedAt) != "" {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(meta.CapturedAt))
+		if err != nil {
+			return "", "", time.Time{}, errors.New("captured_at must be RFC3339")
+		}
+		capturedAt = parsed.UTC()
+	}
+	return title, folder, capturedAt, nil
+}
+
+func clipPlaceholderMarkdown(title string) string {
+	return "# " + strings.TrimSpace(title) + "\n\n"
+}
+
+func htmlClipMarkdown(title string, meta clipMetadata, capturedAt time.Time) string {
+	var b strings.Builder
+	b.WriteString("# ")
+	b.WriteString(markdownLine(title))
+	b.WriteString("\n\n")
+	writeClipAttribution(&b, meta, capturedAt)
+	selection := strings.TrimSpace(meta.SelectionText)
+	if selection != "" {
+		b.WriteString("\n> ")
+		b.WriteString(strings.ReplaceAll(markdownLine(limitRunes(selection, 800)), "\n", "\n> "))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func imageClipMarkdown(title string, meta clipMetadata, capturedAt time.Time, filename, assetURL string) string {
+	var b strings.Builder
+	b.WriteString("# ")
+	b.WriteString(markdownLine(title))
+	b.WriteString("\n\n")
+	writeClipAttribution(&b, meta, capturedAt)
+	b.WriteString("\n![")
+	b.WriteString(markdownLine(filename))
+	b.WriteString("](")
+	b.WriteString(assetURL)
+	b.WriteString(")\n")
+	return b.String()
+}
+
+func writeClipAttribution(b *strings.Builder, meta clipMetadata, capturedAt time.Time) {
+	source := strings.TrimSpace(meta.SourceURL)
+	if source == "" {
+		source = strings.TrimSpace(meta.PageURL)
+	}
+	if source != "" {
+		b.WriteString("Source: ")
+		b.WriteString(source)
+		b.WriteByte('\n')
+	}
+	if page := strings.TrimSpace(meta.PageURL); page != "" && page != source {
+		b.WriteString("Page: ")
+		b.WriteString(page)
+		b.WriteByte('\n')
+	}
+	b.WriteString("Captured: ")
+	b.WriteString(capturedAt.Format(time.RFC3339))
+	b.WriteByte('\n')
+}
+
+func mergedClipSearchText(extracted, supplied string) string {
+	parts := []string{}
+	if text := strings.TrimSpace(extracted); text != "" {
+		parts = append(parts, text)
+	}
+	if text := strings.TrimSpace(supplied); text != "" && !strings.Contains(extracted, text) {
+		parts = append(parts, text)
+	}
+	return strings.TrimSpace(limitRunes(strings.Join(parts, "\n"), 250000))
+}
+
+func clipNoteHeaderJSON(kind string, asset store.Asset, meta clipMetadata, extra map[string]any) (string, error) {
+	header := map[string]any{
+		"kind": "clip",
+		"clip": map[string]any{
+			"type":             kind,
+			"source_url":       strings.TrimSpace(meta.SourceURL),
+			"page_url":         strings.TrimSpace(meta.PageURL),
+			"destination_kind": strings.TrimSpace(meta.DestinationKind),
+			"captured_at":      strings.TrimSpace(meta.CapturedAt),
+		},
+		"asset": map[string]any{
+			"id":           asset.ID,
+			"slug":         asset.Slug,
+			"filename":     asset.Filename,
+			"content_type": asset.ContentType,
+			"size":         asset.Size,
+		},
+	}
+	for key, value := range extra {
+		header[key] = value
+	}
+	data, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func documentClipHeaderJSON(kind string, asset store.Asset, previewAsset *store.Asset, meta clipMetadata) (string, error) {
+	header := map[string]any{
+		"kind": "webpage",
+		"clip": map[string]any{
+			"type":             kind,
+			"source_url":       strings.TrimSpace(meta.SourceURL),
+			"page_url":         strings.TrimSpace(meta.PageURL),
+			"destination_kind": strings.TrimSpace(meta.DestinationKind),
+			"captured_at":      strings.TrimSpace(meta.CapturedAt),
+		},
+		"asset": map[string]any{
+			"id":           asset.ID,
+			"slug":         asset.Slug,
+			"filename":     asset.Filename,
+			"content_type": asset.ContentType,
+			"size":         asset.Size,
+		},
+	}
+	if previewAsset != nil {
+		header["preview_asset"] = map[string]any{
+			"id":           previewAsset.ID,
+			"slug":         previewAsset.Slug,
+			"filename":     previewAsset.Filename,
+			"content_type": previewAsset.ContentType,
+			"size":         previewAsset.Size,
+		}
+	}
+	data, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func markdownLine(value string) string {
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.TrimSpace(value)
+}
+
+func limitRunes(value string, n int) string {
+	runes := []rune(value)
+	if len(runes) <= n {
+		return value
+	}
+	return string(runes[:n]) + "..."
+}
+
+func contentTypeForFile(filename string, data []byte) string {
+	contentType := mime.TypeByExtension(filepath.Ext(filename))
+	if contentType == "" && len(data) > 0 {
+		contentType = http.DetectContentType(data)
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return contentType
+}
+
+func normalizeFolderPath(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	if value == "" || value == "." {
+		return "/"
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	clean := path.Clean(value)
+	if clean == "." {
+		return "/"
+	}
+	return clean
 }
 
 func cleanObsidianTarget(value string) string {
@@ -1012,10 +1943,7 @@ func (s *Server) apiAssets(w http.ResponseWriter, r *http.Request) {
 		contentType = override
 	}
 	if contentType == "" {
-		contentType = mime.TypeByExtension(filepath.Ext(header.Filename))
-	}
-	if contentType == "" {
-		contentType = http.DetectContentType(data)
+		contentType = contentTypeForFile(header.Filename, data)
 	}
 	saved, err := s.blobs.SaveAsset(cu.User.ID, header.Filename, data)
 	if err != nil {
@@ -1024,10 +1952,19 @@ func (s *Server) apiAssets(w http.ResponseWriter, r *http.Request) {
 	}
 	noteID, _ := strconv.ParseInt(r.FormValue("note_id"), 10, 64)
 	encrypted := strings.EqualFold(strings.TrimSpace(r.FormValue("encrypted")), "true") || r.FormValue("encrypted") == "1"
-	asset, err := s.store.CreateAsset(r.Context(), store.Asset{UserID: cu.User.ID, NoteID: noteID, Filename: header.Filename, ContentType: contentType, BlobPath: saved.Path, SHA256: saved.SHA256, Size: saved.Size, Encrypted: encrypted})
+	searchText := ""
+	if !encrypted {
+		searchText = document.SearchableText(header.Filename, contentType, data)
+	}
+	asset, err := s.store.CreateAsset(r.Context(), store.Asset{UserID: cu.User.ID, NoteID: noteID, Filename: header.Filename, ContentType: contentType, BlobPath: saved.Path, SHA256: saved.SHA256, Size: saved.Size, Encrypted: encrypted, SearchText: searchText})
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if noteID > 0 {
+		if note, version, err := s.store.GetNote(r.Context(), cu.User.ID, noteID); err == nil {
+			s.indexCurrent(r.Context(), note, version)
+		}
 	}
 	writeJSON(w, map[string]any{"asset": asset, "url": s.appPath(fmt.Sprintf("/assets/%s/%s", asset.Slug, urlPathSegment(asset.Filename)))})
 }
@@ -1062,6 +1999,10 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	} else {
 		w.Header().Set("Content-Type", asset.ContentType)
+	}
+	if strings.HasPrefix(strings.ToLower(asset.ContentType), "text/html") {
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
 	http.ServeContent(w, r, asset.Filename, asset.CreatedAt, f)
 }
@@ -1154,6 +2095,7 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			summary := store.NoteSummary{Note: note}
 			if _, version, err := s.store.GetNote(r.Context(), cu.User.ID, hit.ID); err == nil {
+				summary.HeaderJSON = version.HeaderJSON
 				if note.IsEncrypted {
 					summary.Preview = "Encrypted note"
 				} else {
@@ -1232,9 +2174,13 @@ func (s *Server) apiSyncPush(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) indexCurrent(ctx context.Context, note store.Note, version store.NoteVersion) {
+	if s.search == nil {
+		return
+	}
+	assetText, _ := s.store.AssetSearchTextForNote(ctx, note.OwnerUserID, note.ID)
 	_ = s.search.Index(ctx, store.SearchDocument{
 		NoteID: note.ID, UserID: note.OwnerUserID, Title: note.Title, FolderPath: note.FolderPath,
-		Content: version.Content, HeaderJSON: version.HeaderJSON, UpdatedAt: note.UpdatedAt,
+		Content: version.Content, HeaderJSON: version.HeaderJSON, AssetText: assetText, UpdatedAt: note.UpdatedAt,
 		Encrypted: note.IsEncrypted, Shared: note.IsShared,
 	})
 }

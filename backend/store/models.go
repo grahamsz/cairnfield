@@ -29,12 +29,24 @@ type Session struct {
 	LastSeenAt time.Time
 }
 
+type APIToken struct {
+	ID         int64     `json:"id"`
+	UserID     int64     `json:"user_id"`
+	Name       string    `json:"name"`
+	TokenHash  string    `json:"-"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastUsedAt time.Time `json:"last_used_at,omitempty"`
+	RevokedAt  time.Time `json:"revoked_at,omitempty"`
+}
+
 type Folder struct {
-	ID        int64     `json:"id"`
-	UserID    int64     `json:"user_id"`
-	Path      string    `json:"path"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          int64     `json:"id"`
+	UserID      int64     `json:"user_id"`
+	Path        string    `json:"path"`
+	DisplayMode string    `json:"display_mode"`
+	SortMode    string    `json:"sort_mode"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Note struct {
@@ -70,7 +82,8 @@ type NoteVersion struct {
 
 type NoteSummary struct {
 	Note
-	Preview string `json:"preview"`
+	Preview    string `json:"preview"`
+	HeaderJSON string `json:"header_json,omitempty"`
 }
 
 type CurrentNote struct {
@@ -112,6 +125,7 @@ type Asset struct {
 	SHA256      string    `json:"sha256"`
 	Size        int64     `json:"size"`
 	Encrypted   bool      `json:"encrypted"`
+	SearchText  string    `json:"-"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -152,8 +166,17 @@ type SearchDocument struct {
 	FolderPath string
 	Content    string
 	HeaderJSON string
+	AssetText  string
 	UpdatedAt  time.Time
 	Encrypted  bool
 	Shared     bool
 	HasImage   bool
+}
+
+type MoodboardItem struct {
+	Note         Note        `json:"note"`
+	Version      NoteVersion `json:"version"`
+	Asset        *Asset      `json:"asset,omitempty"`
+	PreviewAsset *Asset      `json:"preview_asset,omitempty"`
+	Position     int         `json:"position"`
 }

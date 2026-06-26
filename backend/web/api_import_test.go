@@ -131,6 +131,56 @@ func TestZipImportRewritesObsidianImageEmbeds(t *testing.T) {
 	}
 }
 
+func TestImportDOCXCreatesSearchableDocumentNote(t *testing.T) {
+	db := testStore(t)
+	defer db.Close()
+	hash, err := auth.HashPassword("password-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.CreateUser(t.Context(), "person@example.com", "Person", hash, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	docx := zipWithFiles(t, map[string]zipTestFile{
+		"word/document.xml": {
+			Content:  []byte(`<w:document xmlns:w="urn:test"><w:body><w:p><w:r><w:t>Quarterly Forecast Needle</w:t></w:r></w:p></w:body></w:document>`),
+			Modified: time.Now().UTC(),
+		},
+	})
+	blobs := blob.New(t.TempDir())
+	searchService, err := search.OpenPerUser(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer searchService.Close()
+	res := runImportFileRequest(t, db, user, blobs, searchService, "forecast.docx", docx)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+	}
+	hits, err := searchService.Search(t.Context(), user.ID, "Quarterly Forecast Needle", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits = %d, want 1", len(hits))
+	}
+	assets, err := db.ListBackupAssets(t.Context(), user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || !strings.Contains(assets[0].SearchText, "Quarterly Forecast Needle") {
+		t.Fatalf("assets = %+v", assets)
+	}
+	_, version, err := db.GetNote(t.Context(), user.ID, hits[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(version.HeaderJSON, `"kind":"document"`) || !strings.Contains(version.HeaderJSON, `"content_type"`) {
+		t.Fatalf("header_json = %s", version.HeaderJSON)
+	}
+}
+
 func zipWithMarkdown(t *testing.T, name, content string, modified time.Time) []byte {
 	t.Helper()
 	return zipWithFiles(t, map[string]zipTestFile{name: {Content: []byte(content), Modified: modified}})
@@ -164,13 +214,23 @@ func zipWithFiles(t *testing.T, files map[string]zipTestFile) []byte {
 
 func runImportRequest(t *testing.T, db *store.Store, user store.User, blobs *blob.Store, zipBytes []byte) *httptest.ResponseRecorder {
 	t.Helper()
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	part, err := mw.CreateFormFile("file", "notes.zip")
+	searchService, err := search.OpenPerUser(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := part.Write(zipBytes); err != nil {
+	defer searchService.Close()
+	return runImportFileRequest(t, db, user, blobs, searchService, "notes.zip", zipBytes)
+}
+
+func runImportFileRequest(t *testing.T, db *store.Store, user store.User, blobs *blob.Store, searchService *search.Service, filename string, data []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(data); err != nil {
 		t.Fatal(err)
 	}
 	if err := mw.Close(); err != nil {
@@ -180,11 +240,6 @@ func runImportRequest(t *testing.T, db *store.Store, user store.User, blobs *blo
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req = req.WithContext(context.WithValue(req.Context(), currentUserKey, currentUser{User: user}))
 	res := httptest.NewRecorder()
-	searchService, err := search.OpenPerUser(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer searchService.Close()
 	New(Options{Store: db, Search: searchService, Blobs: blobs}).apiImport(res, req)
 	return res
 }

@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Send image to Cairnfield</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="popup">
+    <main>
+      <h1>Send image</h1>
+      <label>Destination<select id="destination"></select></label>
+      <div class="actions">
+        <button id="send" type="button">
+          <span class="icon image" aria-hidden="true"></span>
+          <span>Send image</span>
+        </button>
+        <button id="cancel" type="button" class="secondary">Cancel</button>
+      </div>
+      <p id="status" role="status"></p>
+    </main>
+    <script type="module" src="image-picker.js"></script>
+  </body>
+</html>

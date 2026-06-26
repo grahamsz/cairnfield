@@ -1,4 +1,4 @@
-import type { Asset, BackupExport, Bootstrap, EncryptionKey, FolderRecord, Note, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
+import type { APIToken, Asset, BackupExport, Bootstrap, EncryptionKey, FolderRecord, MoodboardItem, Note, NoteDetail, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
 import { appURL } from "./base";
 
 type PageResponse = { notes: NoteSummary[]; page: number; page_size: number; has_more: boolean };
@@ -50,17 +50,24 @@ export const api = {
   adminUsers: () => getJSON<{ users: User[] }>("/api/admin/users"),
   users: () => getJSON<{ users: User[] }>("/api/users"),
   updateProfile: (csrf: string, body: { date_format: string; theme?: string }) => putJSON<{ user: User }>("/api/profile", csrf, body),
+  tokens: () => getJSON<{ tokens: APIToken[] }>("/api/tokens"),
+  createToken: (csrf: string, name: string) => postJSON<{ token: APIToken; raw_token: string }>("/api/tokens", csrf, { name }),
+  revokeToken: (csrf: string, id: number) => deleteJSON<{ ok: boolean }>(`/api/tokens/${id}`, csrf),
+  extensionZipURL: () => appURL("/api/extension/zip"),
   createUser: (csrf: string, body: { email: string; name: string; password: string; is_admin: boolean }) => postJSON<{ user: User }>("/api/admin/users", csrf, body),
   notes: (folder = "", page = 1, descendants = false) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ folder, page: String(page), ...(descendants ? { descendants: "1" } : {}) })}`),
   trash: (page = 1) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ trash: "1", page: String(page) })}`),
   starred: (page = 1) => getJSON<PageResponse>(`/api/notes?${new URLSearchParams({ starred: "1", page: String(page) })}`),
   createNote: (csrf: string, templateID = 0, selectedFolder = "/") => postJSON<{ note: Note; version: NoteVersion; reused: boolean }>("/api/notes", csrf, { template_id: templateID, selected_folder: selectedFolder }),
-  note: (id: number | string) => getJSON<{ note: Note; version: NoteVersion; shares: Share[] }>(`/api/notes/${id}`),
+  note: (id: number | string) => getJSON<NoteDetail>(`/api/notes/${id}`),
   saveNote: (csrf: string, id: number, body: { title: string; folder_path: string; content: string; header_json: string; base_version_id: number; client_id: string; is_encrypted: boolean; autosave?: boolean }) =>
     putJSON<{ note: Note; version: NoteVersion; conflict: boolean }>(`/api/notes/${id}`, csrf, body),
   folders: () => getJSON<{ folders: FolderRecord[] }>("/api/folders"),
   createFolder: (csrf: string, path: string) => postJSON<{ folder: FolderRecord }>("/api/folders", csrf, { path }),
   moveFolder: (csrf: string, source: string, targetParent: string) => postJSON<{ folders: FolderRecord[] }>("/api/folders/move", csrf, { source, target_parent: targetParent }),
+  setFolderMode: (csrf: string, path: string, mode: "list" | "gallery" | "moodboard", sortMode = "newest") => postJSON<{ folder: FolderRecord }>("/api/folders/mode", csrf, { path, mode, sort_mode: sortMode }),
+  moodboard: (folder: string, descendants = false) => getJSON<{ items: MoodboardItem[]; folder: string }>(`/api/moodboard?${new URLSearchParams({ folder, ...(descendants ? { descendants: "1" } : {}) })}`),
+  saveMoodboardOrder: (csrf: string, folder: string, noteIDs: number[]) => postJSON<{ items: MoodboardItem[] }>("/api/moodboard/order", csrf, { folder, note_ids: noteIDs }),
   moveNote: (csrf: string, id: number, folderPath: string) => postJSON<{ note: Note; version: NoteVersion }>(`/api/notes/${id}/folder`, csrf, { folder_path: folderPath }),
   starNote: (csrf: string, id: number, starred: boolean) => postJSON<{ note: Note; version: NoteVersion }>(`/api/notes/${id}/star`, csrf, { starred }),
   trashNote: (csrf: string, id: number) => postJSON<{ note: Note; version: NoteVersion }>(`/api/notes/${id}/trash`, csrf),
@@ -81,10 +88,11 @@ export const api = {
     if (contentType) form.set("content_type", contentType);
     return parse<{ asset: Asset; url: string }>(await fetch(appURL("/api/assets"), { method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrf }, body: form }));
   },
-  importNotes: async (csrf: string, file: File, folderPath = "/") => {
+  importNotes: async (csrf: string, file: File, folderPath = "/", preview?: File) => {
     const form = new FormData();
     form.set("file", file);
     form.set("folder_path", folderPath);
+    if (preview) form.set("preview", preview);
     return parse<{ notes: Note[]; count: number }>(await fetch(appURL("/api/import"), { method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrf }, body: form }));
   },
   keys: () => getJSON<{ keys: EncryptionKey[] }>("/api/keys"),

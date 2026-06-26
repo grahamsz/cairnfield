@@ -61,13 +61,32 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			last_seen_at INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS api_tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			last_used_at INTEGER NOT NULL DEFAULT 0,
+			revoked_at INTEGER NOT NULL DEFAULT 0
+		)`,
 		`CREATE TABLE IF NOT EXISTS folders (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			path TEXT NOT NULL,
+			display_mode TEXT NOT NULL DEFAULT 'list',
+			sort_mode TEXT NOT NULL DEFAULT 'newest',
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
 			UNIQUE(user_id, path)
+		)`,
+		`CREATE TABLE IF NOT EXISTS moodboard_items (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			folder_path TEXT NOT NULL,
+			note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+			position INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(user_id, folder_path, note_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS notes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +155,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			sha256 TEXT NOT NULL,
 			size INTEGER NOT NULL,
 			encrypted INTEGER NOT NULL DEFAULT 0,
+			search_text TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS encryption_keys (
@@ -175,7 +195,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE encryption_keys ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE note_user_state ADD COLUMN starred_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE assets ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE assets ADD COLUMN search_text TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN date_format TEXT NOT NULL DEFAULT 'ymd_slash'`,
+		`ALTER TABLE folders ADD COLUMN display_mode TEXT NOT NULL DEFAULT 'list'`,
+		`ALTER TABLE folders ADD COLUMN sort_mode TEXT NOT NULL DEFAULT 'newest'`,
 		`ALTER TABLE note_templates ADD COLUMN create_once INTEGER NOT NULL DEFAULT 0`,
 		`UPDATE note_templates SET body_template = replace(body_template, '\n', char(10)) WHERE instr(body_template, '\n') > 0`,
 		`UPDATE note_templates SET create_once = 1 WHERE lower(name) IN ('daily note', 'diary', 'diary post') AND instr(title_template, '{date}') > 0`,
@@ -186,6 +209,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_note_user_state_user ON note_user_state(user_id, trashed_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_backup_exports_user_created ON backup_exports(user_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_backup_exports_expires ON backup_exports(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_tokens_user_created ON api_tokens(user_id, created_at DESC)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -449,6 +473,88 @@ func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 	return err
 }
 
+func (s *Store) CreateAPIToken(ctx context.Context, userID int64, name, tokenHash string) (APIToken, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return APIToken{}, errors.New("token name is required")
+	}
+	if tokenHash == "" {
+		return APIToken{}, errors.New("token hash is required")
+	}
+	ts := nowUnix()
+	res, err := s.db.ExecContext(ctx, `INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?, ?, ?, ?)`, userID, name, tokenHash, ts)
+	if err != nil {
+		return APIToken{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return APIToken{}, err
+	}
+	return s.GetAPIToken(ctx, userID, id)
+}
+
+func (s *Store) GetAPIToken(ctx context.Context, userID, id int64) (APIToken, error) {
+	return scanAPIToken(s.db.QueryRowContext(ctx, `SELECT id, user_id, name, token_hash, created_at, last_used_at, revoked_at FROM api_tokens WHERE user_id = ? AND id = ?`, userID, id))
+}
+
+func (s *Store) ListAPITokens(ctx context.Context, userID int64) ([]APIToken, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, name, token_hash, created_at, last_used_at, revoked_at FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC, id DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []APIToken{}
+	for rows.Next() {
+		token, err := scanAPIToken(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, token)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UserByAPITokenHash(ctx context.Context, tokenHash string) (User, APIToken, error) {
+	token, err := scanAPIToken(s.db.QueryRowContext(ctx, `SELECT id, user_id, name, token_hash, created_at, last_used_at, revoked_at FROM api_tokens WHERE token_hash = ? AND revoked_at = 0`, tokenHash))
+	if err != nil {
+		return User{}, APIToken{}, err
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, nowUnix(), token.ID)
+	user, err := s.GetUserByID(ctx, token.UserID)
+	if err != nil {
+		return User{}, APIToken{}, err
+	}
+	token.LastUsedAt = time.Now().UTC()
+	return user, token, nil
+}
+
+func (s *Store) RevokeAPIToken(ctx context.Context, userID, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE api_tokens SET revoked_at = CASE WHEN revoked_at = 0 THEN ? ELSE revoked_at END WHERE user_id = ? AND id = ?`, nowUnix(), userID, id)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func scanAPIToken(row scanner) (APIToken, error) {
+	var token APIToken
+	var created, lastUsed, revoked int64
+	if err := row.Scan(&token.ID, &token.UserID, &token.Name, &token.TokenHash, &created, &lastUsed, &revoked); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return APIToken{}, ErrNotFound
+		}
+		return APIToken{}, err
+	}
+	token.CreatedAt = unixTime(created)
+	token.LastUsedAt = unixTime(lastUsed)
+	token.RevokedAt = unixTime(revoked)
+	return token, nil
+}
+
 func normalizeFolder(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -529,7 +635,7 @@ func (s *Store) ListTemplates(ctx context.Context, userID int64) ([]Template, er
 }
 
 func (s *Store) ListFolders(ctx context.Context, userID int64) ([]Folder, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, path, created_at, updated_at FROM folders WHERE user_id = ? ORDER BY path`, userID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, path, display_mode, sort_mode, created_at, updated_at FROM folders WHERE user_id = ? ORDER BY path`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -537,12 +643,18 @@ func (s *Store) ListFolders(ctx context.Context, userID int64) ([]Folder, error)
 	for rows.Next() {
 		var f Folder
 		var created, updated int64
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Path, &created, &updated); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Path, &f.DisplayMode, &f.SortMode, &created, &updated); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
 		f.CreatedAt = unixTime(created)
 		f.UpdatedAt = unixTime(updated)
+		if f.DisplayMode == "" {
+			f.DisplayMode = "list"
+		}
+		if f.SortMode == "" {
+			f.SortMode = "newest"
+		}
 		out = append(out, f)
 	}
 	if err := rows.Err(); err != nil {
@@ -575,7 +687,7 @@ func (s *Store) ListFolders(ctx context.Context, userID int64) ([]Folder, error)
 		}
 		path = normalizeFolder(path)
 		if !seen[path] {
-			out = append(out, Folder{UserID: userID, Path: path, CreatedAt: time.Now(), UpdatedAt: time.Now()})
+			out = append(out, Folder{UserID: userID, Path: path, DisplayMode: "list", SortMode: "newest", CreatedAt: time.Now(), UpdatedAt: time.Now()})
 			seen[path] = true
 		}
 	}
@@ -592,14 +704,86 @@ func (s *Store) CreateFolder(ctx context.Context, userID int64, path string) (Fo
 	}
 	var f Folder
 	var created, updated int64
-	err = s.db.QueryRowContext(ctx, `SELECT id, user_id, path, created_at, updated_at FROM folders WHERE user_id = ? AND path = ?`, userID, path).
-		Scan(&f.ID, &f.UserID, &f.Path, &created, &updated)
+	err = s.db.QueryRowContext(ctx, `SELECT id, user_id, path, display_mode, sort_mode, created_at, updated_at FROM folders WHERE user_id = ? AND path = ?`, userID, path).
+		Scan(&f.ID, &f.UserID, &f.Path, &f.DisplayMode, &f.SortMode, &created, &updated)
 	if err != nil {
 		return Folder{}, err
 	}
 	f.CreatedAt = unixTime(created)
 	f.UpdatedAt = unixTime(updated)
+	if f.DisplayMode == "" {
+		f.DisplayMode = "list"
+	}
+	if f.SortMode == "" {
+		f.SortMode = "newest"
+	}
 	return f, nil
+}
+
+func (s *Store) SetFolderDisplayMode(ctx context.Context, userID int64, path, mode string) (Folder, error) {
+	path = normalizeFolder(path)
+	sortMode := "newest"
+	_ = s.db.QueryRowContext(ctx, `SELECT sort_mode FROM folders WHERE user_id = ? AND path = ?`, userID, path).Scan(&sortMode)
+	return s.SetFolderSettings(ctx, userID, path, mode, sortMode)
+}
+
+func (s *Store) SetFolderSettings(ctx context.Context, userID int64, path, mode, sortMode string) (Folder, error) {
+	path = normalizeFolder(path)
+	mode = strings.TrimSpace(mode)
+	sortMode = strings.TrimSpace(sortMode)
+	if mode == "" {
+		mode = "list"
+	}
+	if sortMode == "" {
+		sortMode = "newest"
+	}
+	if mode != "list" && mode != "gallery" && mode != "moodboard" {
+		return Folder{}, errors.New("unsupported folder display mode")
+	}
+	if sortMode != "newest" && sortMode != "oldest" && sortMode != "alphabetical" && sortMode != "custom" {
+		return Folder{}, errors.New("unsupported folder sort mode")
+	}
+	if mode == "moodboard" {
+		hasChildren, err := s.folderHasChildFolders(ctx, userID, path)
+		if err != nil {
+			return Folder{}, err
+		}
+		if hasChildren {
+			return Folder{}, errors.New("moodboard view is only available for folders without child folders")
+		}
+	}
+	ts := nowUnix()
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO folders (user_id, path, display_mode, sort_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, path) DO UPDATE SET display_mode = excluded.display_mode, sort_mode = excluded.sort_mode, updated_at = excluded.updated_at`, userID, path, mode, sortMode, ts, ts); err != nil {
+		return Folder{}, err
+	}
+	folders, err := s.ListFolders(ctx, userID)
+	if err != nil {
+		return Folder{}, err
+	}
+	for _, folder := range folders {
+		if normalizeFolder(folder.Path) == path {
+			return folder, nil
+		}
+	}
+	return Folder{}, ErrNotFound
+}
+
+func (s *Store) folderHasChildFolders(ctx context.Context, userID int64, path string) (bool, error) {
+	path = normalizeFolder(path)
+	prefix := strings.TrimRight(path, "/") + "/%"
+	if path == "/" {
+		prefix = "/%"
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
+		SELECT path FROM folders WHERE user_id = ? AND path != ? AND path LIKE ?
+		UNION
+		SELECT folder_path FROM notes WHERE owner_user_id = ? AND trashed_at = 0 AND folder_path != ? AND folder_path LIKE ?
+		UNION
+		SELECT folder_path FROM note_user_state WHERE user_id = ? AND folder_path != '' AND folder_path != ? AND folder_path LIKE ?
+	)`, userID, path, prefix, userID, path, prefix, userID, path, prefix).Scan(&count)
+	return count > 0, err
 }
 
 func (s *Store) MoveFolder(ctx context.Context, userID int64, source, targetParent string) error {
@@ -621,35 +805,46 @@ func (s *Store) MoveFolder(ctx context.Context, userID int64, source, targetPare
 	if err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT path FROM folders WHERE user_id = ? AND (path = ? OR path LIKE ?) ORDER BY length(path)`, userID, source, source+"/%")
+	rows, err := tx.QueryContext(ctx, `SELECT path, display_mode, sort_mode FROM folders WHERE user_id = ? AND (path = ? OR path LIKE ?) ORDER BY length(path)`, userID, source, source+"/%")
 	if err != nil {
 		_ = tx.Rollback()
 		return err
 	}
-	folderPaths := []string{}
+	type movingFolder struct {
+		path     string
+		mode     string
+		sortMode string
+	}
+	folderPaths := []movingFolder{}
 	for rows.Next() {
-		var oldPath string
-		if err := rows.Scan(&oldPath); err != nil {
+		var oldPath, mode, sortMode string
+		if err := rows.Scan(&oldPath, &mode, &sortMode); err != nil {
 			_ = rows.Close()
 			_ = tx.Rollback()
 			return err
 		}
-		folderPaths = append(folderPaths, normalizeFolder(oldPath))
+		if mode == "" {
+			mode = "list"
+		}
+		if sortMode == "" {
+			sortMode = "newest"
+		}
+		folderPaths = append(folderPaths, movingFolder{path: normalizeFolder(oldPath), mode: mode, sortMode: sortMode})
 	}
 	if err := rows.Close(); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
 	if len(folderPaths) == 0 {
-		folderPaths = append(folderPaths, source)
+		folderPaths = append(folderPaths, movingFolder{path: source, mode: "list", sortMode: "newest"})
 	}
-	for _, oldPath := range folderPaths {
-		newPath := replaceFolderPrefix(oldPath, source, target)
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO folders (user_id, path, created_at, updated_at) VALUES (?, ?, ?, ?)`, userID, newPath, ts, ts); err != nil {
+	for _, oldFolder := range folderPaths {
+		newPath := replaceFolderPrefix(oldFolder.path, source, target)
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO folders (user_id, path, display_mode, sort_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, userID, newPath, oldFolder.mode, oldFolder.sortMode, ts, ts); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE folders SET updated_at = ? WHERE user_id = ? AND path = ?`, ts, userID, newPath); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE folders SET display_mode = ?, sort_mode = ?, updated_at = ? WHERE user_id = ? AND path = ?`, oldFolder.mode, oldFolder.sortMode, ts, userID, newPath); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -660,6 +855,11 @@ func (s *Store) MoveFolder(ctx context.Context, userID int64, source, targetPare
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE notes SET folder_path = ? || substr(folder_path, ?), updated_at = ? WHERE owner_user_id = ? AND (folder_path = ? OR folder_path LIKE ?)`,
 		target, len(source)+1, ts, userID, source, source+"/%"); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE moodboard_items SET folder_path = ? || substr(folder_path, ?) WHERE user_id = ? AND (folder_path = ? OR folder_path LIKE ?)`,
+		target, len(source)+1, userID, source, source+"/%"); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -938,6 +1138,10 @@ func (s *Store) CreateNoteWithContentAt(ctx context.Context, userID int64, title
 }
 
 func (s *Store) ReplaceImportedNoteContentAt(ctx context.Context, userID, noteID int64, content string, timestamp time.Time) (Note, NoteVersion, error) {
+	return s.ReplaceImportedNoteContentAndHeaderAt(ctx, userID, noteID, content, "", timestamp)
+}
+
+func (s *Store) ReplaceImportedNoteContentAndHeaderAt(ctx context.Context, userID, noteID int64, content, header string, timestamp time.Time) (Note, NoteVersion, error) {
 	if timestamp.IsZero() {
 		timestamp = time.Now().UTC()
 	}
@@ -946,11 +1150,14 @@ func (s *Store) ReplaceImportedNoteContentAt(ctx context.Context, userID, noteID
 	if err != nil {
 		return Note{}, NoteVersion{}, err
 	}
+	if strings.TrimSpace(header) == "" {
+		header = version.HeaderJSON
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Note{}, NoteVersion{}, err
 	}
-	if err := updateVersion(ctx, tx, version.ID, content, version.HeaderJSON, "import"); err != nil {
+	if err := updateVersion(ctx, tx, version.ID, content, header, "import"); err != nil {
 		_ = tx.Rollback()
 		return Note{}, NoteVersion{}, err
 	}
@@ -1150,8 +1357,19 @@ func (s *Store) ListNoteSummaries(ctx context.Context, userID int64, folder stri
 		limit = 50
 	}
 	folder = normalizeFolder(folder)
+	sortMode := "newest"
+	_ = s.db.QueryRowContext(ctx, `SELECT sort_mode FROM folders WHERE user_id = ? AND path = ?`, userID, folder).Scan(&sortMode)
+	orderBy := "n.updated_at DESC, n.id DESC"
+	switch sortMode {
+	case "oldest":
+		orderBy = "n.created_at ASC, n.id ASC"
+	case "alphabetical":
+		orderBy = "lower(n.title) ASC, n.id ASC"
+	case "custom":
+		orderBy = "COALESCE(m.position, 2147483647), n.updated_at DESC, n.id DESC"
+	}
 	whereFolder := ""
-	args := []any{userID, userID, userID, userID, userID, userID}
+	args := []any{userID, userID, userID, userID, userID, folder, userID, userID}
 	if folder != "/" {
 		folderExpr := "CASE WHEN n.owner_user_id = ? THEN n.folder_path ELSE COALESCE(NULLIF(us.folder_path, ''), n.folder_path) END"
 		if includeDescendants {
@@ -1170,14 +1388,15 @@ func (s *Store) ListNoteSummaries(ctx context.Context, userID int64, folder stri
 		COALESCE(ns.permission, ''),
 		CASE WHEN n.owner_user_id = ? THEN n.trashed_at ELSE COALESCE(us.trashed_at, 0) END,
 		COALESCE(us.starred_at, 0),
-		n.created_at, n.updated_at,
+		n.created_at, n.updated_at, nv.header_json,
 		substr(CAST(nv.content_blob AS TEXT), 1, 240)
 		FROM notes n
 		JOIN note_versions nv ON nv.id = n.current_version_id
 		LEFT JOIN note_shares ns ON ns.note_id = n.id AND ns.shared_user_id = ?
 		LEFT JOIN note_user_state us ON us.note_id = n.id AND us.user_id = ?
+		LEFT JOIN moodboard_items m ON m.user_id = ? AND m.folder_path = ? AND m.note_id = n.id
 		WHERE CASE WHEN n.owner_user_id = ? THEN n.trashed_at ELSE COALESCE(us.trashed_at, 0) END = 0 AND (n.owner_user_id = ? OR ns.shared_user_id IS NOT NULL)`+whereFolder+`
-		ORDER BY n.updated_at DESC LIMIT ? OFFSET ?`, args...)
+		ORDER BY `+orderBy+` LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1187,7 +1406,7 @@ func (s *Store) ListNoteSummaries(ctx context.Context, userID int64, folder stri
 		var n NoteSummary
 		var encrypted, shared int
 		var trashed, starred, created, updated int64
-		if err := rows.Scan(&n.ID, &n.OwnerUserID, &n.FolderPath, &n.Title, &n.Slug, &n.CurrentVersionID, &encrypted, &shared, &n.SharedPermission, &trashed, &starred, &created, &updated, &n.Preview); err != nil {
+		if err := rows.Scan(&n.ID, &n.OwnerUserID, &n.FolderPath, &n.Title, &n.Slug, &n.CurrentVersionID, &encrypted, &shared, &n.SharedPermission, &trashed, &starred, &created, &updated, &n.HeaderJSON, &n.Preview); err != nil {
 			return nil, err
 		}
 		n.IsEncrypted = encrypted != 0
@@ -1462,7 +1681,7 @@ func (s *Store) ListTrashSummaries(ctx context.Context, userID int64, limit, off
 		COALESCE(ns.permission, ''),
 		CASE WHEN n.owner_user_id = ? THEN n.trashed_at ELSE COALESCE(us.trashed_at, 0) END,
 		COALESCE(us.starred_at, 0),
-		n.created_at, n.updated_at,
+		n.created_at, n.updated_at, nv.header_json,
 		substr(CAST(nv.content_blob AS TEXT), 1, 240)
 		FROM notes n
 		JOIN note_versions nv ON nv.id = n.current_version_id
@@ -1480,7 +1699,7 @@ func (s *Store) ListTrashSummaries(ctx context.Context, userID int64, limit, off
 		var n NoteSummary
 		var encrypted, shared int
 		var trashed, starred, created, updated int64
-		if err := rows.Scan(&n.ID, &n.OwnerUserID, &n.FolderPath, &n.Title, &n.Slug, &n.CurrentVersionID, &encrypted, &shared, &n.SharedPermission, &trashed, &starred, &created, &updated, &n.Preview); err != nil {
+		if err := rows.Scan(&n.ID, &n.OwnerUserID, &n.FolderPath, &n.Title, &n.Slug, &n.CurrentVersionID, &encrypted, &shared, &n.SharedPermission, &trashed, &starred, &created, &updated, &n.HeaderJSON, &n.Preview); err != nil {
 			return nil, err
 		}
 		n.IsEncrypted = encrypted != 0
@@ -1510,7 +1729,7 @@ func (s *Store) ListStarredSummaries(ctx context.Context, userID int64, limit, o
 		COALESCE(ns.permission, ''),
 		CASE WHEN n.owner_user_id = ? THEN n.trashed_at ELSE COALESCE(us.trashed_at, 0) END,
 		COALESCE(us.starred_at, 0),
-		n.created_at, n.updated_at,
+		n.created_at, n.updated_at, nv.header_json,
 		substr(CAST(nv.content_blob AS TEXT), 1, 240)
 		FROM notes n
 		JOIN note_versions nv ON nv.id = n.current_version_id
@@ -1529,7 +1748,7 @@ func (s *Store) ListStarredSummaries(ctx context.Context, userID int64, limit, o
 		var n NoteSummary
 		var encrypted, shared int
 		var trashed, starred, created, updated int64
-		if err := rows.Scan(&n.ID, &n.OwnerUserID, &n.FolderPath, &n.Title, &n.Slug, &n.CurrentVersionID, &encrypted, &shared, &n.SharedPermission, &trashed, &starred, &created, &updated, &n.Preview); err != nil {
+		if err := rows.Scan(&n.ID, &n.OwnerUserID, &n.FolderPath, &n.Title, &n.Slug, &n.CurrentVersionID, &encrypted, &shared, &n.SharedPermission, &trashed, &starred, &created, &updated, &n.HeaderJSON, &n.Preview); err != nil {
 			return nil, err
 		}
 		n.IsEncrypted = encrypted != 0
@@ -1653,8 +1872,8 @@ func (s *Store) CreateAsset(ctx context.Context, a Asset) (Asset, error) {
 	if err != nil {
 		return Asset{}, err
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO assets (slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		slug, a.UserID, a.NoteID, a.VersionID, a.Filename, a.ContentType, a.BlobPath, a.SHA256, a.Size, boolInt(a.Encrypted), ts)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO assets (slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, search_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		slug, a.UserID, a.NoteID, a.VersionID, a.Filename, a.ContentType, a.BlobPath, a.SHA256, a.Size, boolInt(a.Encrypted), strings.TrimSpace(a.SearchText), ts)
 	if err != nil {
 		return Asset{}, err
 	}
@@ -1668,8 +1887,8 @@ func (s *Store) GetAsset(ctx context.Context, userID, assetID int64) (Asset, err
 	var a Asset
 	var created int64
 	var encrypted int
-	err := s.db.QueryRowContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, created_at FROM assets WHERE id = ? AND user_id = ?`, assetID, userID).
-		Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, search_text, created_at FROM assets WHERE id = ? AND user_id = ?`, assetID, userID).
+		Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &a.SearchText, &created)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Asset{}, ErrNotFound
@@ -1685,8 +1904,8 @@ func (s *Store) GetAssetBySlug(ctx context.Context, userID int64, slug string) (
 	var a Asset
 	var created int64
 	var encrypted int
-	err := s.db.QueryRowContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, created_at FROM assets WHERE slug = ? AND user_id = ?`, slug, userID).
-		Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, search_text, created_at FROM assets WHERE slug = ? AND user_id = ?`, slug, userID).
+		Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &a.SearchText, &created)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Asset{}, ErrNotFound
@@ -1696,6 +1915,168 @@ func (s *Store) GetAssetBySlug(ctx context.Context, userID int64, slug string) (
 	a.Encrypted = encrypted != 0
 	a.CreatedAt = unixTime(created)
 	return a, nil
+}
+
+func (s *Store) AssetSearchTextForNote(ctx context.Context, userID, noteID int64) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT search_text FROM assets WHERE user_id = ? AND note_id = ? AND encrypted = 0 AND search_text != '' ORDER BY created_at, id`, userID, noteID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var parts []string
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			return "", err
+		}
+		text = strings.TrimSpace(text)
+		if text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(parts, " "), nil
+}
+
+func (s *Store) ListAssetsForNote(ctx context.Context, userID, noteID int64) ([]Asset, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, search_text, created_at FROM assets WHERE user_id = ? AND note_id = ? ORDER BY created_at, id`, userID, noteID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Asset{}
+	for rows.Next() {
+		var a Asset
+		var encrypted int
+		var created int64
+		if err := rows.Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &a.SearchText, &created); err != nil {
+			return nil, err
+		}
+		a.Encrypted = encrypted != 0
+		a.CreatedAt = unixTime(created)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListMoodboardItems(ctx context.Context, userID int64, folder string, includeDescendants bool) ([]MoodboardItem, error) {
+	folder = normalizeFolder(folder)
+	sortMode := "newest"
+	_ = s.db.QueryRowContext(ctx, `SELECT sort_mode FROM folders WHERE user_id = ? AND path = ?`, userID, folder).Scan(&sortMode)
+	orderBy := "n.updated_at DESC, n.id DESC"
+	switch sortMode {
+	case "oldest":
+		orderBy = "n.created_at ASC, n.id ASC"
+	case "alphabetical":
+		orderBy = "lower(n.title) ASC, n.id ASC"
+	case "custom":
+		orderBy = "COALESCE(m.position, 2147483647), n.updated_at DESC, n.id DESC"
+	}
+	folderExpr := "CASE WHEN n.owner_user_id = ? THEN n.folder_path ELSE COALESCE(NULLIF(us.folder_path, ''), n.folder_path) END"
+	whereFolder := "AND " + folderExpr + " = ?"
+	args := []any{userID, userID, userID, userID, userID, folder, userID, userID, userID, folder}
+	if includeDescendants && folder != "/" {
+		whereFolder = "AND (" + folderExpr + " = ? OR " + folderExpr + " LIKE ?)"
+		args = []any{userID, userID, userID, userID, userID, folder, userID, userID, userID, folder, userID, folder + "/%"}
+	} else if includeDescendants && folder == "/" {
+		whereFolder = ""
+		args = []any{userID, userID, userID, userID, userID, folder, userID, userID}
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner_user_id,
+		CASE WHEN n.owner_user_id = ? THEN n.folder_path ELSE COALESCE(NULLIF(us.folder_path, ''), n.folder_path) END,
+		n.title, n.slug, n.current_version_id, n.is_encrypted,
+		EXISTS(SELECT 1 FROM note_shares sx WHERE sx.note_id = n.id),
+		COALESCE(ns.permission, ''),
+		CASE WHEN n.owner_user_id = ? THEN n.trashed_at ELSE COALESCE(us.trashed_at, 0) END,
+		COALESCE(us.starred_at, 0),
+		n.created_at, n.updated_at,
+		nv.id, nv.note_id, nv.user_id, nv.content_blob, nv.header_json, nv.body_sha256, nv.base_version_id, nv.client_id, nv.conflicted, nv.created_at,
+		a.id, a.slug, a.user_id, a.note_id, a.version_id, a.filename, a.content_type, a.blob_path, a.sha256, a.size, a.encrypted, a.search_text, a.created_at,
+		pa.id, pa.slug, pa.user_id, pa.note_id, pa.version_id, pa.filename, pa.content_type, pa.blob_path, pa.sha256, pa.size, pa.encrypted, pa.search_text, pa.created_at,
+		COALESCE(m.position, 2147483647)
+		FROM notes n
+		JOIN note_versions nv ON nv.id = n.current_version_id
+		LEFT JOIN note_shares ns ON ns.note_id = n.id AND ns.shared_user_id = ?
+		LEFT JOIN note_user_state us ON us.note_id = n.id AND us.user_id = ?
+		LEFT JOIN moodboard_items m ON m.user_id = ? AND m.folder_path = ? AND m.note_id = n.id
+		LEFT JOIN assets a ON a.id = (SELECT ax.id FROM assets ax WHERE ax.user_id = n.owner_user_id AND ax.note_id = n.id ORDER BY ax.created_at, ax.id LIMIT 1)
+		LEFT JOIN assets pa ON pa.id = CAST(json_extract(nv.header_json, '$.preview_asset.id') AS INTEGER)
+		WHERE CASE WHEN n.owner_user_id = ? THEN n.trashed_at ELSE COALESCE(us.trashed_at, 0) END = 0
+		AND (n.owner_user_id = ? OR ns.shared_user_id IS NOT NULL)
+		`+whereFolder+`
+		ORDER BY `+orderBy, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MoodboardItem{}
+	for rows.Next() {
+		var item MoodboardItem
+		var noteEncrypted, shared, starred, conflicted int
+		var trashed, noteCreated, noteUpdated, versionCreated int64
+		var content []byte
+		var assetID, assetUserID, assetNoteID, assetVersionID, assetSize, assetCreated sql.NullInt64
+		var assetSlug, assetFilename, assetContentType, assetBlobPath, assetSHA, assetSearchText sql.NullString
+		var assetEncrypted sql.NullInt64
+		var previewID, previewUserID, previewNoteID, previewVersionID, previewSize, previewCreated sql.NullInt64
+		var previewSlug, previewFilename, previewContentType, previewBlobPath, previewSHA, previewSearchText sql.NullString
+		var previewEncrypted sql.NullInt64
+		if err := rows.Scan(&item.Note.ID, &item.Note.OwnerUserID, &item.Note.FolderPath, &item.Note.Title, &item.Note.Slug, &item.Note.CurrentVersionID, &noteEncrypted, &shared, &item.Note.SharedPermission, &trashed, &starred, &noteCreated, &noteUpdated,
+			&item.Version.ID, &item.Version.NoteID, &item.Version.UserID, &content, &item.Version.HeaderJSON, &item.Version.BodySHA256, &item.Version.BaseVersionID, &item.Version.ClientID, &conflicted, &versionCreated,
+			&assetID, &assetSlug, &assetUserID, &assetNoteID, &assetVersionID, &assetFilename, &assetContentType, &assetBlobPath, &assetSHA, &assetSize, &assetEncrypted, &assetSearchText, &assetCreated,
+			&previewID, &previewSlug, &previewUserID, &previewNoteID, &previewVersionID, &previewFilename, &previewContentType, &previewBlobPath, &previewSHA, &previewSize, &previewEncrypted, &previewSearchText, &previewCreated,
+			&item.Position); err != nil {
+			return nil, err
+		}
+		item.Note.IsEncrypted = noteEncrypted != 0
+		item.Note.IsShared = shared != 0
+		item.Note.IsStarred = starred != 0
+		item.Note.TrashedAt = unixTime(trashed)
+		item.Note.CreatedAt = unixTime(noteCreated)
+		item.Note.UpdatedAt = unixTime(noteUpdated)
+		item.Version.Content = string(content)
+		item.Version.Conflicted = conflicted != 0
+		item.Version.CreatedAt = unixTime(versionCreated)
+		if assetID.Valid {
+			item.Asset = &Asset{
+				ID: assetID.Int64, Slug: assetSlug.String, UserID: assetUserID.Int64, NoteID: assetNoteID.Int64, VersionID: assetVersionID.Int64,
+				Filename: assetFilename.String, ContentType: assetContentType.String, BlobPath: assetBlobPath.String, SHA256: assetSHA.String,
+				Size: assetSize.Int64, Encrypted: assetEncrypted.Int64 != 0, SearchText: assetSearchText.String, CreatedAt: unixTime(assetCreated.Int64),
+			}
+		}
+		if previewID.Valid {
+			item.PreviewAsset = &Asset{
+				ID: previewID.Int64, Slug: previewSlug.String, UserID: previewUserID.Int64, NoteID: previewNoteID.Int64, VersionID: previewVersionID.Int64,
+				Filename: previewFilename.String, ContentType: previewContentType.String, BlobPath: previewBlobPath.String, SHA256: previewSHA.String,
+				Size: previewSize.Int64, Encrypted: previewEncrypted.Int64 != 0, SearchText: previewSearchText.String, CreatedAt: unixTime(previewCreated.Int64),
+			}
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveMoodboardOrder(ctx context.Context, userID int64, folder string, noteIDs []int64) error {
+	folder = normalizeFolder(folder)
+	ts := nowUnix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for position, noteID := range noteIDs {
+		if noteID <= 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO moodboard_items (user_id, folder_path, note_id, position, updated_at) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(user_id, folder_path, note_id) DO UPDATE SET position = excluded.position, updated_at = excluded.updated_at`,
+			userID, folder, noteID, position, ts); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpsertEncryptionKey(ctx context.Context, k EncryptionKey) (EncryptionKey, error) {
@@ -1783,11 +2164,13 @@ func (s *Store) SetDefaultEncryptionKey(ctx context.Context, userID, keyID int64
 }
 
 func (s *Store) SearchDocumentsForCurrentNotes(ctx context.Context, userID int64) ([]SearchDocument, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner_user_id, n.title, n.folder_path, nv.content_blob, nv.header_json, n.updated_at, n.is_encrypted,
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.owner_user_id, n.title, n.folder_path, nv.content_blob, nv.header_json, COALESCE(group_concat(a.search_text, ' '), ''), n.updated_at, n.is_encrypted,
 		EXISTS(SELECT 1 FROM note_shares ns WHERE ns.note_id = n.id),
 		EXISTS(SELECT 1 FROM assets a WHERE a.note_id = n.id)
 		FROM notes n JOIN note_versions nv ON nv.id = n.current_version_id
-		WHERE n.owner_user_id = ? AND n.is_encrypted = 0`, userID)
+		LEFT JOIN assets a ON a.note_id = n.id AND a.encrypted = 0 AND a.search_text != ''
+		WHERE n.owner_user_id = ? AND n.is_encrypted = 0
+		GROUP BY n.id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1798,7 +2181,7 @@ func (s *Store) SearchDocumentsForCurrentNotes(ctx context.Context, userID int64
 		var content []byte
 		var updated int64
 		var encrypted, shared, hasImage int
-		if err := rows.Scan(&d.NoteID, &d.UserID, &d.Title, &d.FolderPath, &content, &d.HeaderJSON, &updated, &encrypted, &shared, &hasImage); err != nil {
+		if err := rows.Scan(&d.NoteID, &d.UserID, &d.Title, &d.FolderPath, &content, &d.HeaderJSON, &d.AssetText, &updated, &encrypted, &shared, &hasImage); err != nil {
 			return nil, err
 		}
 		d.Content = string(content)
@@ -1958,7 +2341,7 @@ func (s *Store) ListBackupNotes(ctx context.Context, userID int64) ([]BackupNote
 }
 
 func (s *Store) ListBackupAssets(ctx context.Context, userID int64) ([]Asset, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, created_at FROM assets WHERE user_id = ? ORDER BY created_at, id`, userID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, search_text, created_at FROM assets WHERE user_id = ? ORDER BY created_at, id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1968,7 +2351,7 @@ func (s *Store) ListBackupAssets(ctx context.Context, userID int64) ([]Asset, er
 		var a Asset
 		var created int64
 		var encrypted int
-		if err := rows.Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &created); err != nil {
+		if err := rows.Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &a.SearchText, &created); err != nil {
 			return nil, err
 		}
 		a.Encrypted = encrypted != 0

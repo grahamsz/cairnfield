@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorkerURL from "pdfjs-dist/build/pdf.worker.mjs?url";
 import {
   CaretDownIcon,
   CaretRightIcon,
+  BrowserIcon,
   CheckIcon,
   ClockCounterClockwiseIcon,
   CodeIcon,
   DownloadSimpleIcon,
   DotsSixVerticalIcon,
+  EyeIcon,
   FilePlusIcon,
+  FilePdfIcon,
   FileTextIcon,
   FloppyDiskIcon,
   FolderPlusIcon,
   FolderIcon,
+  ImageIcon,
   GearIcon,
   LockOpenIcon,
   KeyIcon,
@@ -26,8 +32,10 @@ import {
   StarIcon,
   ShareNetworkIcon,
   SignOutIcon,
+  SquaresFourIcon,
   UsersIcon
 } from "@phosphor-icons/react";
+import MarkdownPreview from "@uiw/react-markdown-preview";
 import {
   BlockTypeSelect,
   BoldItalicUnderlineToggles,
@@ -55,26 +63,42 @@ import {
   UndoRedo
 } from "@mdxeditor/editor";
 import "@mdxeditor/editor/style.css";
+import "@uiw/react-markdown-preview/markdown.css";
 import { api, messageFromError } from "./api";
 import { appPathname, appURL } from "./base";
 import { decryptBytes, decryptText, downloadKey, encryptBytes, encryptText, generateKey, passphraseIssues, privateKeyMetadata, verifyPrivateKey } from "./crypto";
 import { deleteOfflineNote, loadBrowserPGPKey, loadOfflineBootstrap, loadOfflineSync, noteSummaryFromSync, offlineNote, pendingEdits, queueEdit, removePendingEdits, replaceOfflineFolders, saveBrowserPGPKey, saveOfflineBootstrap, saveOfflineSync, upsertOfflineFolder, upsertOfflineNote, type PendingOperation } from "./offline";
-import type { AuthProvider, BackupExport, Bootstrap, EncryptionKey, FolderRecord, Note, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
+import type { APIToken, Asset, AuthProvider, BackupExport, Bootstrap, EncryptionKey, FolderRecord, MoodboardItem, Note, NoteDetail, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerURL;
 
 type Toast = { id: number; message: string; kind: "success" | "error" | "loading" };
 type View = "editor" | "folder" | "search" | "settings" | "admin";
 type EditorMode = "rich" | "raw" | "history" | "share";
 type SaveCause = "auto" | "manual";
 type AppTheme = "classic" | "dark";
+type FolderDisplayMode = "list" | "gallery" | "moodboard";
+type FolderSortMode = "newest" | "oldest" | "alphabetical" | "custom";
 type FolderNode = { path: string; name: string; children: FolderNode[]; notes: NoteSummary[]; noteCount: number };
 type ImportRequest = { files: File[]; folderPath: string };
 type SecurityUnlock = { keyID: number; label: string; fingerprint: string; publicKeyArmored: string; privateKeyArmored: string; passphrase: string; unlockedUntil: number };
-type EditorSnapshot = { activeNote: Note; version: NoteVersion; title: string; folder: string; content: string; encrypted: boolean; plainUnlocked: boolean; securityUnlock: SecurityUnlock | null; defaultKey: EncryptionKey | null; signature: string };
+type EditorSnapshot = { activeNote: Note; version: NoteVersion; title: string; folder: string; content: string; headerJSON: string; encrypted: boolean; plainUnlocked: boolean; securityUnlock: SecurityUnlock | null; defaultKey: EncryptionKey | null; signature: string };
 type DateFormatOption = { value: string; label: string; sample: string };
 type SyncPushResult = { op?: "create" | "update"; client_id?: string; note_id?: number; note?: Note; version?: NoteVersion; conflict?: boolean; error?: string };
 
 let toastSeq = 1;
 const appLockChannelName = "cairnfield-lock";
+const folderDisplayModes: { value: FolderDisplayMode; label: string }[] = [
+  { value: "list", label: "List" },
+  { value: "gallery", label: "Gallery" },
+  { value: "moodboard", label: "Moodboard" }
+];
+const folderSortModes: { value: FolderSortMode; label: string }[] = [
+  { value: "newest", label: "Newest" },
+  { value: "oldest", label: "Oldest" },
+  { value: "alphabetical", label: "A-Z" },
+  { value: "custom", label: "Custom" }
+];
 const dateFormatOptions: DateFormatOption[] = [
   { value: "ymd_slash", label: "YYYY/MM/DD", sample: "2026/06/24" },
   { value: "mdy_slash", label: "MM/DD/YYYY", sample: "06/24/2026" },
@@ -90,6 +114,7 @@ export default function App() {
   const [activeNote, setActiveNote] = useState<Note | null>(null);
   const [version, setVersion] = useState<NoteVersion | null>(null);
   const [shares, setShares] = useState<Share[]>([]);
+  const [activeAssets, setActiveAssets] = useState<Asset[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [keys, setKeys] = useState<EncryptionKey[]>([]);
   const [folder, setFolder] = useState("");
@@ -98,6 +123,8 @@ export default function App() {
   const [searchPage, setSearchPage] = useState(1);
   const [searchHasMore, setSearchHasMore] = useState(false);
   const [folderNotes, setFolderNotes] = useState<NoteSummary[]>([]);
+  const [moodboardItems, setMoodboardItems] = useState<MoodboardItem[]>([]);
+  const [folderViewMode, setFolderViewMode] = useState<FolderDisplayMode>("list");
   const [folderPage, setFolderPage] = useState(1);
   const [folderHasMore, setFolderHasMore] = useState(false);
   const [view, setView] = useState<View>("editor");
@@ -252,7 +279,7 @@ export default function App() {
 
   const openNote = useCallback(async (id: number | string, historyMode: "push" | "replace" | "none" = "push") => {
     try {
-      let data: { note: Note; version: NoteVersion; shares: Share[] };
+      let data: NoteDetail;
       try {
         data = await api.note(id);
         await upsertOfflineNote(data.note, data.version);
@@ -260,7 +287,7 @@ export default function App() {
       } catch (err) {
         const cached = await offlineNote(id);
         if (!cached) throw err;
-        data = { note: cached.note, version: cached.version, shares: [] };
+        data = { note: cached.note, version: cached.version, shares: [], assets: [] };
         setOfflineMode(true);
       }
       let note = data.note;
@@ -279,6 +306,7 @@ export default function App() {
       setActiveNote(note);
       setVersion(noteVersion);
       setShares(data.shares || []);
+      setActiveAssets(data.assets || []);
       setView("editor");
       setMobileOpen(false);
       setExpandedFolders((current) => expandAncestors(current, data.note.folder_path || "/"));
@@ -339,7 +367,9 @@ export default function App() {
     if (!activeNote) {
       const routeKey = noteKeyFromLocation();
       const routeSearch = searchRouteFromLocation();
+      const routeFolder = folderPathFromLocation();
       if (routeSearch.query) void executeSearch(routeSearch.query, "replace", routeSearch.page);
+      else if (routeFolder.path) void openFolder(routeFolder.path, routeFolder.page, "replace");
       else if (routeKey) void openNote(routeKey, "replace");
       else if (list[0]) void openNote(list[0].id, "replace");
     }
@@ -379,8 +409,10 @@ export default function App() {
     const onPopState = () => {
       const key = noteKeyFromLocation();
       const routeSearch = searchRouteFromLocation();
+      const routeFolder = folderPathFromLocation();
       if (key) void openNote(key, "none");
       else if (routeSearch.query) void executeSearch(routeSearch.query, "none", routeSearch.page);
+      else if (routeFolder.path) void openFolder(routeFolder.path, routeFolder.page, "none");
       else setView("editor");
     };
     window.addEventListener("popstate", onPopState);
@@ -448,8 +480,23 @@ export default function App() {
     await executeSearch(query, "push", 1);
   }
 
-  async function openFolder(path: string, page = 1) {
+  async function openFolder(path: string, page = 1, historyMode: "push" | "replace" | "none" = "push") {
     try {
+      const folderRecord = folders.find((item) => normalizeFolderPath(item.path) === normalizeFolderPath(path));
+      const displayMode = folderRecord?.display_mode || "list";
+      if (path !== "__trash" && path !== "__starred" && page === 1 && (displayMode === "gallery" || displayMode === "moodboard") && navigator.onLine) {
+        const data = await api.moodboard(path || "/", displayMode === "gallery");
+        setMoodboardItems(data.items || []);
+        setFolderNotes((data.items || []).map((item) => ({ ...item.note, preview: item.note.is_encrypted ? "Encrypted note" : item.version.content.slice(0, 180) })));
+        setSelectedNoteIDs(new Set());
+        setFolder(path);
+        setFolderPage(1);
+        setFolderHasMore(false);
+        setFolderViewMode(displayMode);
+        setView("folder");
+        pushFolderHistory(path, page, historyMode);
+        return;
+      }
       let data: { notes: NoteSummary[]; page: number; has_more: boolean };
       try {
         if (offlineMode || !navigator.onLine) throw new Error("offline");
@@ -465,13 +512,16 @@ export default function App() {
         setOfflineMode(true);
       }
       const summaries = unlocked ? preserveUnlockedTitles(data.notes || [], decryptedTitleCache.current) : data.notes || [];
-      const list = [...summaries].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+      const list = sortNoteSummaries(summaries, folderRecord?.sort_mode || "newest");
       setFolderNotes(list);
+      setMoodboardItems([]);
+      setFolderViewMode("list");
       setSelectedNoteIDs(new Set());
       setFolder(path);
       setFolderPage(data.page || page);
       setFolderHasMore(Boolean(data.has_more));
       setView("folder");
+      pushFolderHistory(path, data.page || page, historyMode);
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
@@ -481,6 +531,20 @@ export default function App() {
   if (!bootstrap.users_exist) return <AuthShell><Setup csrf={csrf} onDone={refreshBootstrap} /></AuthShell>;
   if (!user) return <AuthShell><Login csrf={csrf} authProviders={bootstrap.auth_providers || []} onDone={refreshBootstrap} /></AuthShell>;
   const userID = user.id;
+  const activeFolderRecord = !folder.startsWith("__") ? folders.find((item) => normalizeFolderPath(item.path) === normalizeFolderPath(folder || "/")) : null;
+  const activeFolderSortMode: FolderSortMode = activeFolderRecord?.sort_mode || "newest";
+  const activeFolderDisplayMode: FolderDisplayMode = activeFolderRecord?.display_mode || folderViewMode || "list";
+  const activeFolderHasChildren = !folder.startsWith("__") && folderHasChildFolders(folders, folder || "/");
+  const moodboardDisabledReason = activeFolderHasChildren ? "Moodboard is only available for folders without child folders." : "";
+  const folderControls = view === "folder" && folder !== "__trash" && folder !== "__starred" ? (
+    <FolderViewControls
+      mode={activeFolderDisplayMode}
+      sortMode={activeFolderSortMode}
+      moodboardDisabledReason={moodboardDisabledReason}
+      onModeChange={(mode) => void setFolderSettings(folder || "/", mode, activeFolderSortMode).catch((err) => addToast(messageFromError(err), "error"))}
+      onSortChange={(sortMode) => void setFolderSortMode(folder || "/", sortMode).catch((err) => addToast(messageFromError(err), "error"))}
+    />
+  ) : null;
 
   async function createNote(templateID = 0, encryptedNote = false) {
     try {
@@ -601,6 +665,42 @@ export default function App() {
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
+  }
+
+  async function setFolderSettings(path: string, mode: FolderDisplayMode, sortMode?: FolderSortMode) {
+    if (offlineMode || !navigator.onLine) {
+      addToast("Folder display settings are unavailable offline.", "error");
+      return;
+    }
+    const previous = folders.find((item) => normalizeFolderPath(item.path) === normalizeFolderPath(path));
+    const nextSort = sortMode || previous?.sort_mode || "newest";
+    const data = await api.setFolderMode(csrf, path, mode, nextSort);
+    setFolders((items) => upsertFolder(items, data.folder));
+    await replaceOfflineFolders(upsertFolder(folders, data.folder));
+    if ((mode === "gallery" || mode === "moodboard") && normalizeFolderPath(folder || "/") === normalizeFolderPath(path || "/")) {
+      const board = await api.moodboard(path || "/", mode === "gallery");
+      setMoodboardItems(board.items || []);
+      setFolderNotes((board.items || []).map((item) => ({ ...item.note, preview: item.note.is_encrypted ? "Encrypted note" : item.version.content.slice(0, 180) })));
+      setSelectedNoteIDs(new Set());
+      setFolder(path);
+      setFolderPage(1);
+      setFolderHasMore(false);
+      setFolderViewMode(mode);
+      setView("folder");
+    } else if (normalizeFolderPath(folder || "/") === normalizeFolderPath(path)) {
+      setMoodboardItems([]);
+      setFolderViewMode("list");
+      const refreshed = await api.notes(path, 1, true);
+      const summaries = unlocked ? preserveUnlockedTitles(refreshed.notes || [], decryptedTitleCache.current) : refreshed.notes || [];
+      setFolderNotes(sortNoteSummaries(summaries, nextSort));
+      setFolderPage(refreshed.page || 1);
+      setFolderHasMore(Boolean(refreshed.has_more));
+    }
+  }
+
+  async function setFolderSortMode(path: string, sortMode: FolderSortMode) {
+    const previous = folders.find((item) => normalizeFolderPath(item.path) === normalizeFolderPath(path));
+    await setFolderSettings(path, previous?.display_mode || folderViewMode || "list", sortMode);
   }
 
   async function moveNotesToFolder(noteIDs: number[], targetFolder: string) {
@@ -746,12 +846,18 @@ export default function App() {
       }
       let count = 0;
       for (const file of files) {
-        const result = await api.importNotes(csrf, file, targetFolder);
+        const preview = await pdfPreviewFile(file).catch(() => undefined);
+        const result = await api.importNotes(csrf, file, targetFolder, preview);
         count += result.count;
       }
       addToast(`Imported ${count} note${count === 1 ? "" : "s"}.`);
       await loadNotes();
       await loadFolders();
+      if ((folderViewMode === "gallery" || folderViewMode === "moodboard") && normalizeFolderPath(folder || "/") === normalizeFolderPath(targetFolder || "/")) {
+        const board = await api.moodboard(targetFolder || "/", folderViewMode === "gallery");
+        setMoodboardItems(board.items || []);
+        setFolderNotes((board.items || []).map((item) => ({ ...item.note, preview: item.note.is_encrypted ? "Encrypted note" : item.version.content.slice(0, 180) })));
+      }
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
@@ -867,8 +973,9 @@ export default function App() {
           {view === "settings" ? <SettingsView csrf={csrf} user={user} updateUser={updateCurrentUser} templates={templates} initialTemplateID={templateEditID} setTemplates={setTemplates} keys={keys} setKeys={setKeys} addToast={addToast} /> :
             view === "admin" ? <AdminView csrf={csrf} addToast={addToast} /> :
             view === "search" ? <NoteListView csrf={csrf} title="Search" subtitle={`${searchResults.length.toLocaleString()} result${searchResults.length === 1 ? "" : "s"} on page ${searchPage} for ${query}${offlineMode ? " - Offline search is limited" : ""}`} results={searchResults} setResults={setSearchResults} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} highlight={query} addToast={addToast} page={searchPage} hasMore={searchHasMore} onPageChange={(page) => executeSearch(query, "push", page)} offlineMode={offlineMode} /> :
-            view === "folder" ? <NoteListView csrf={csrf} title={folderTitle(folder)} subtitle={`${folderNotes.length.toLocaleString()} note${folderNotes.length === 1 ? "" : "s"} on page ${folderPage}, recently edited first`} results={folderNotes} setResults={setFolderNotes} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} addToast={addToast} page={folderPage} hasMore={folderHasMore} onPageChange={(page) => openFolder(folder, page)} action={folder === "__trash" ? <button type="button" className="secondary danger-action" disabled={folderNotes.length === 0} onClick={() => void emptyTrash()}><TrashIcon />Empty trash</button> : null} /> :
-            <EditorView csrf={csrf} user={user} activeNote={activeNote} version={version} shares={shares} defaultKey={defaultKey} securityUnlock={unlocked} openUnlock={() => setSecurityUnlockOpen(true)} rememberDecryptedTitle={(id, title) => decryptedTitleCache.current.set(id, title)} setActiveNote={setActiveNote} setVersion={setVersion} setShares={setShares} setNotes={setNotes} reloadNotes={loadNotes} addToast={addToast} offlineMode={offlineMode} />}
+            view === "folder" && (folderViewMode === "gallery" || folderViewMode === "moodboard") && folder !== "__trash" && folder !== "__starred" ? <MoodboardView folder={folder} mode={folderViewMode} sortMode={activeFolderSortMode} controls={folderControls} items={moodboardItems} setItems={setMoodboardItems} csrf={csrf} openNote={openNote} importFiles={importFiles} setFolderSortMode={setFolderSortMode} addToast={addToast} /> :
+            view === "folder" ? <NoteListView csrf={csrf} title={folderTitle(folder)} subtitle={`${folderNotes.length.toLocaleString()} note${folderNotes.length === 1 ? "" : "s"} on page ${folderPage}, ${folderSortLabel(activeFolderSortMode).toLowerCase()} first`} results={folderNotes} setResults={setFolderNotes} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} addToast={addToast} page={folderPage} hasMore={folderHasMore} onPageChange={(page) => openFolder(folder, page)} action={folder === "__trash" ? <button type="button" className="secondary danger-action" disabled={folderNotes.length === 0} onClick={() => void emptyTrash()}><TrashIcon />Empty trash</button> : folderControls} /> :
+            <EditorView csrf={csrf} user={user} activeNote={activeNote} version={version} assets={activeAssets} shares={shares} defaultKey={defaultKey} securityUnlock={unlocked} openUnlock={() => setSecurityUnlockOpen(true)} rememberDecryptedTitle={(id, title) => decryptedTitleCache.current.set(id, title)} setActiveNote={setActiveNote} setVersion={setVersion} setShares={setShares} setActiveAssets={setActiveAssets} setNotes={setNotes} reloadNotes={loadNotes} addToast={addToast} offlineMode={offlineMode} />}
         </main>
       </div>
       {importRequest ? <ImportApprovalDialog request={importRequest} onCancel={() => setImportRequest(null)} onApprove={() => { const req = importRequest; setImportRequest(null); void importFiles(req.files, req.folderPath); }} /> : null}
@@ -940,10 +1047,10 @@ function ImportApprovalDialog({ request, onCancel, onApprove }: { request: Impor
   const zipCount = request.files.filter((file) => file.name.toLowerCase().endsWith(".zip")).length;
   return (
     <div className="modal-backdrop" onClick={onCancel}>
-      <div className="security-dialog" role="dialog" aria-label="Import notes" onClick={(event) => event.stopPropagation()}>
-        <div className="modal-head"><h2>Import notes</h2><button type="button" className="ghost" onClick={onCancel}>Close</button></div>
+      <div className="security-dialog" role="dialog" aria-label="Import files" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head"><h2>Import files</h2><button type="button" className="ghost" onClick={onCancel}>Close</button></div>
         <p className="muted">Import {request.files.length} file{request.files.length === 1 ? "" : "s"} into {request.folderPath || "/"}.</p>
-        {zipCount > 0 ? <div className="notice subtle">Zip archives can contain many notes. Cairnfield will import markdown files and preserve archive folders under the target folder.</div> : null}
+        {zipCount > 0 ? <div className="notice subtle">Zip archives with markdown files import those notes and preserve archive folders. Archives without markdown become one document note per file.</div> : null}
         <div className="import-file-list">{request.files.map((file) => <span key={`${file.name}-${file.size}`}><UploadSimpleIcon />{file.name}</span>)}</div>
         <div className="modal-actions"><button type="button" className="secondary" onClick={onCancel}>Cancel</button><button type="button" onClick={onApprove}>Import</button></div>
       </div>
@@ -981,11 +1088,12 @@ function AuthForm({ title, submitLabel, loginOnly = false, authProviders = [], o
   );
 }
 
-function EditorView({ csrf, user, activeNote, version, shares, defaultKey, securityUnlock, openUnlock, rememberDecryptedTitle, setActiveNote, setVersion, setShares, setNotes, reloadNotes, addToast, offlineMode }: {
+function EditorView({ csrf, user, activeNote, version, assets, shares, defaultKey, securityUnlock, openUnlock, rememberDecryptedTitle, setActiveNote, setVersion, setShares, setActiveAssets, setNotes, reloadNotes, addToast, offlineMode }: {
   csrf: string;
   user: User;
   activeNote: Note | null;
   version: NoteVersion | null;
+  assets: Asset[];
   shares: Share[];
   defaultKey: EncryptionKey | null;
   securityUnlock: SecurityUnlock | null;
@@ -994,6 +1102,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
   setActiveNote: (note: Note | null) => void;
   setVersion: (version: NoteVersion | null) => void;
   setShares: (shares: Share[]) => void;
+  setActiveAssets: (assets: Asset[]) => void;
   setNotes: React.Dispatch<React.SetStateAction<NoteSummary[]>>;
   reloadNotes: () => Promise<void>;
   addToast: (message: string, kind?: Toast["kind"]) => number;
@@ -1041,7 +1150,8 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
     setEncrypted(noteEncrypted);
     setPlainUnlocked(!noteEncrypted || unlockedContent);
     setContent(noteEncrypted && !unlockedContent ? "" : contentValue);
-    const signature = JSON.stringify({ title: titleValue, folder: activeNote?.folder_path || "/", content: noteEncrypted && !unlockedContent ? "" : contentValue, encrypted: noteEncrypted });
+    const headerJSON = version?.header_json || "{}";
+    const signature = JSON.stringify({ title: titleValue, folder: activeNote?.folder_path || "/", content: noteEncrypted && !unlockedContent ? "" : contentValue, headerJSON, encrypted: noteEncrypted });
     lastSavedRef.current = signature;
     pendingCleanSignatureRef.current = signature;
     if (activeNote?.id) savedSignaturesRef.current.set(activeNote.id, signature);
@@ -1071,7 +1181,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       setPlainUnlocked(true);
       rememberDecryptedTitle(note.id, nextTitle || "Untitled");
       setNotes((items) => (items || []).map((item) => item.id === note.id ? { ...item, title: nextTitle || "Untitled" } : item));
-      const signature = JSON.stringify({ title: nextTitle || "Untitled", folder: note.folder_path || "/", content: nextContent || "", encrypted: true });
+      const signature = JSON.stringify({ title: nextTitle || "Untitled", folder: note.folder_path || "/", content: nextContent || "", headerJSON: currentVersion.header_json || "{}", encrypted: true });
       lastSavedRef.current = signature;
       pendingCleanSignatureRef.current = signature;
       savedSignaturesRef.current.set(note.id, signature);
@@ -1144,11 +1254,11 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       saveTitle = await encryptText(snap.title || "Untitled", encryptionKey);
       saveContent = await encryptText(snap.content || "", encryptionKey);
     }
-    const edit = { note_id: snap.activeNote.id, base_version_id: snap.version.id, title: saveTitle, folder_path: snap.folder, content: saveContent, header_json: "{}", client_id: crypto.randomUUID(), is_encrypted: snap.encrypted, autosave: cause === "auto" };
+    const edit = { note_id: snap.activeNote.id, base_version_id: snap.version.id, title: saveTitle, folder_path: snap.folder, content: saveContent, header_json: snap.headerJSON || "{}", client_id: crypto.randomUUID(), is_encrypted: snap.encrypted, autosave: cause === "auto" };
     if (!navigator.onLine) {
       await queueEdit(edit);
       const cachedNote = { ...snap.activeNote, title: saveTitle, folder_path: snap.folder, updated_at: new Date().toISOString() };
-      const cachedVersion = { ...snap.version, content: saveContent, header_json: "{}", client_id: edit.client_id };
+      const cachedVersion = { ...snap.version, content: saveContent, header_json: edit.header_json, client_id: edit.client_id };
       await upsertOfflineNote(cachedNote, cachedVersion);
       setNotes((items) => (items || []).map((item) => item.id === snap.activeNote.id ? { ...item, title: snap.title, folder_path: snap.folder, preview: snap.encrypted ? "" : snap.content.slice(0, 180), updated_at: cachedNote.updated_at } : item));
       if (activeNote?.id === snap.activeNote.id) setStatus("offline");
@@ -1161,7 +1271,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
     } catch (err) {
       await queueEdit(edit);
       const cachedNote = { ...snap.activeNote, title: saveTitle, folder_path: snap.folder, updated_at: new Date().toISOString() };
-      const cachedVersion = { ...snap.version, content: saveContent, header_json: "{}", client_id: edit.client_id };
+      const cachedVersion = { ...snap.version, content: saveContent, header_json: edit.header_json, client_id: edit.client_id };
       await upsertOfflineNote(cachedNote, cachedVersion);
       if (activeNote?.id === snap.activeNote.id) setStatus("offline");
       throw err;
@@ -1205,7 +1315,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       if (appPathname().startsWith("/notes/")) {
         window.history.replaceState({ note: note.slug }, "", appURL(`/notes/${note.slug || note.id}/encrypted-note`));
       }
-      const signature = JSON.stringify({ title: "Encrypted note", folder: note.folder_path || "/", content: "", encrypted: true });
+      const signature = JSON.stringify({ title: "Encrypted note", folder: note.folder_path || "/", content: "", headerJSON: version?.header_json || "{}", encrypted: true });
       lastSavedRef.current = signature;
       savedSignaturesRef.current.set(note.id, signature);
     }
@@ -1219,15 +1329,16 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
   }, [activeNote, flushSnapshot]);
 
   if (activeNote && version) {
-    const signature = JSON.stringify({ title, folder, content, encrypted });
-    const snapshot = { activeNote, version, title, folder, content, encrypted, plainUnlocked, securityUnlock, defaultKey, signature };
+    const headerJSON = version.header_json || "{}";
+    const signature = JSON.stringify({ title, folder, content, headerJSON, encrypted });
+    const snapshot = { activeNote, version, title, folder, content, headerJSON, encrypted, plainUnlocked, securityUnlock, defaultKey, signature };
     snapshotsRef.current.set(activeNote.id, snapshot);
     if (encrypted && plainUnlocked && securityUnlock) lastUnlockedSnapshotRef.current = snapshot;
   }
 
   useEffect(() => {
     if (!activeNote || !version || loadedNoteID.current !== activeNote.id) return;
-    const signature = JSON.stringify({ title, folder, content, encrypted });
+    const signature = JSON.stringify({ title, folder, content, headerJSON: version.header_json || "{}", encrypted });
     if (pendingCleanSignatureRef.current && signature === pendingCleanSignatureRef.current) {
       pendingCleanSignatureRef.current = "";
       lastSavedRef.current = signature;
@@ -1368,7 +1479,7 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
         setTitle("Encrypted note");
         setPlainUnlocked(false);
         setStatus("idle");
-        lastSavedRef.current = JSON.stringify({ title: "Encrypted note", folder, content: "", encrypted: true });
+        lastSavedRef.current = JSON.stringify({ title: "Encrypted note", folder, content: "", headerJSON: version?.header_json || "{}", encrypted: true });
         addToast("Encrypted note locked in this browser.");
         return;
       }
@@ -1381,10 +1492,11 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
       const plain = looksEncrypted(data.version.content) ? await decryptText(data.version.content, securityUnlock.privateKeyArmored, securityUnlock.passphrase) : data.version.content;
       setActiveNote({ ...data.note, title: plainTitle || "Untitled" });
       setVersion({ ...data.version, content: plain || "" });
+      setActiveAssets(data.assets || []);
       setTitle(plainTitle || "Untitled");
       setContent(plain || "");
       setPlainUnlocked(true);
-      lastSavedRef.current = JSON.stringify({ title: plainTitle || "Untitled", folder: data.note.folder_path || "/", content: plain || "", encrypted: true });
+      lastSavedRef.current = JSON.stringify({ title: plainTitle || "Untitled", folder: data.note.folder_path || "/", content: plain || "", headerJSON: data.version.header_json || "{}", encrypted: true });
       addToast("Encrypted note unlocked in this browser.");
       return;
     }
@@ -1403,6 +1515,8 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
 
   if (!activeNote || !version) return <div className="empty-state"><h1>No note selected</h1><p className="muted">Create a note or choose one from the folder browser.</p></div>;
   const richContent = prefixAssetURLs(encrypted && plainUnlocked && assetURLMap.size > 0 ? replaceAssetURLs(content, assetURLMap) : content);
+  const documentAsset = documentNoteAsset(version.header_json, assets);
+  const clipSource = noteClipSource(version.header_json);
 
   return (
     <section className="editor single-editor">
@@ -1411,15 +1525,16 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
           <input className="title-input" value={title} readOnly={encrypted && !plainUnlocked} onChange={(event) => setTitle(event.target.value)} />
           <div className="note-meta-row">
             <span className="folder-chip"><FolderIcon />{folder || "/"}{activeNote.is_shared ? <ShareNetworkIcon className="shared-badge" /> : null}</span>
+            {clipSource ? <a className="source-chip" href={clipSource.url} target="_blank" rel="noreferrer" title={clipSource.url}><BrowserIcon />{clipSource.label}</a> : null}
             {encrypted ? <span className="pgp-status-chip"><LockIcon />PGP encrypted {plainUnlocked ? "unlocked" : "locked"}</span> : null}
             {status !== "idle" ? <span className={`save-state ${status}`}>{saveLabel(status)}</span> : null}
           </div>
         </div>
         <div className="editor-actions">
-          <div className="mode-toggle" role="group" aria-label="Editor mode">
+          {!documentAsset ? <div className="mode-toggle" role="group" aria-label="Editor mode">
             <button type="button" className={mode === "rich" ? "active" : ""} title="Rich editor" aria-label="Rich editor" onClick={() => setMode("rich")}><PencilSimpleIcon /></button>
             <button type="button" className={mode === "raw" ? "active" : ""} title="Raw markdown" aria-label="Raw markdown" onClick={() => setMode("raw")}><CodeIcon /></button>
-          </div>
+          </div> : null}
           <button type="button" className={`icon-only secondary ${mode === "history" ? "active" : ""}`} title="Version history" aria-label="Version history" onClick={() => setMode("history")}><ClockCounterClockwiseIcon /></button>
           <button type="button" className={`icon-only secondary ${activeNote.is_shared ? "shared-action" : ""}`} title="Share note" aria-label="Share note" onClick={() => {
             if (offlineMode || !navigator.onLine) {
@@ -1440,12 +1555,325 @@ function EditorView({ csrf, user, activeNote, version, shares, defaultKey, secur
         </div>
       </div>
       {encrypted && !plainUnlocked ? <LockedNoteView openUnlock={openUnlock} /> : null}
-      {plainUnlocked && mode === "rich" ? <RichMarkdownEditor key={activeNote.id} content={richContent} restoreAssetMarkdown={restoreAssetMarkdown} setContent={setContent} uploadAssetURL={uploadAssetURL} addToast={addToast} /> : null}
-      {plainUnlocked && mode === "raw" ? <RawMarkdownEditor content={content} setContent={setContent} upload={upload} addToast={addToast} /> : null}
-      {plainUnlocked && mode === "history" ? offlineMode || !navigator.onLine ? <div className="panel muted">Version history is unavailable offline.</div> : <History noteID={activeNote.id} currentUser={user} encrypted={activeNote.is_encrypted} securityUnlock={securityUnlock} openUnlock={openUnlock} csrf={csrf} openNote={(id) => api.note(id).then((data) => { setActiveNote(data.note); setVersion(data.version); setShares(data.shares || []); })} addToast={addToast} /> : null}
+      {plainUnlocked && documentAsset && mode !== "history" ? <DocumentNoteView asset={documentAsset} /> : null}
+      {plainUnlocked && !documentAsset && mode === "rich" ? <RichMarkdownEditor key={activeNote.id} content={richContent} restoreAssetMarkdown={restoreAssetMarkdown} setContent={setContent} uploadAssetURL={uploadAssetURL} addToast={addToast} /> : null}
+      {plainUnlocked && !documentAsset && mode === "raw" ? <RawMarkdownEditor content={content} setContent={setContent} upload={upload} addToast={addToast} /> : null}
+      {plainUnlocked && mode === "history" ? offlineMode || !navigator.onLine ? <div className="panel muted">Version history is unavailable offline.</div> : <History noteID={activeNote.id} currentUser={user} encrypted={activeNote.is_encrypted} securityUnlock={securityUnlock} openUnlock={openUnlock} csrf={csrf} openNote={(id) => api.note(id).then((data) => { setActiveNote(data.note); setVersion(data.version); setShares(data.shares || []); setActiveAssets(data.assets || []); })} addToast={addToast} /> : null}
       {shareOpen && !activeNote.is_encrypted ? <ShareDialog csrf={csrf} noteID={activeNote.id} shares={shares} setShares={setShares} onClose={() => setShareOpen(false)} addToast={addToast} /> : null}
     </section>
   );
+}
+
+type DocumentAssetView = Pick<Asset, "slug" | "filename" | "content_type" | "size">;
+
+function DocumentNoteView({ asset }: { asset: DocumentAssetView }) {
+  const url = assetURL(asset);
+  const type = normalizedContentType(asset.content_type);
+  if (type.startsWith("image/")) {
+    return (
+      <div className="document-view image-document">
+        <img src={url} alt={asset.filename} />
+      </div>
+    );
+  }
+  if (type === "application/pdf" || asset.filename.toLowerCase().endsWith(".pdf")) {
+    return (
+      <div className="document-view pdf-document">
+        <iframe title={asset.filename} src={url} />
+      </div>
+    );
+  }
+  if (type === "text/html" || asset.filename.toLowerCase().endsWith(".html") || asset.filename.toLowerCase().endsWith(".htm")) {
+    return (
+      <div className="document-view html-document">
+        <iframe title={asset.filename} src={url} sandbox="" />
+      </div>
+    );
+  }
+  return (
+    <div className="document-view file-document">
+      <div className="file-document-inner">
+        <FileTextIcon />
+        <strong>{asset.filename}</strong>
+        <small>{type || "application/octet-stream"}{asset.size ? ` · ${formatBytes(asset.size)}` : ""}</small>
+        <a className="button" href={url}>Open file</a>
+      </div>
+    </div>
+  );
+}
+
+function FolderViewControls({ mode, sortMode, moodboardDisabledReason, onModeChange, onSortChange }: { mode: FolderDisplayMode; sortMode: FolderSortMode; moodboardDisabledReason?: string; onModeChange: (mode: FolderDisplayMode) => void; onSortChange: (sortMode: FolderSortMode) => void }) {
+  return (
+    <div className="folder-view-controls" aria-label="Folder view settings">
+      <div className="segmented-control" aria-label="Display mode">
+        {folderDisplayModes.map((option) => {
+          const disabled = option.value === "moodboard" && Boolean(moodboardDisabledReason);
+          return <button key={option.value} type="button" className={mode === option.value ? "active" : ""} disabled={disabled} title={disabled ? moodboardDisabledReason : option.label} onClick={() => onModeChange(option.value)}>{option.label}</button>;
+        })}
+      </div>
+      {moodboardDisabledReason ? <span className="folder-view-note">{moodboardDisabledReason}</span> : null}
+      <label className="sort-control">
+        <span>Sort</span>
+        <select value={sortMode} onChange={(event) => onSortChange(event.target.value as FolderSortMode)}>
+          {folderSortModes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+      </label>
+    </div>
+  );
+}
+
+function MoodboardView({ folder, mode, sortMode, controls, items, setItems, csrf, openNote, importFiles, setFolderSortMode, addToast }: {
+  folder: string;
+  mode: "gallery" | "moodboard";
+  sortMode: FolderSortMode;
+  controls: React.ReactNode;
+  items: MoodboardItem[];
+  setItems: React.Dispatch<React.SetStateAction<MoodboardItem[]>>;
+  csrf: string;
+  openNote: (id: number | string) => Promise<void>;
+  importFiles: (files: File[], targetFolder: string) => Promise<void>;
+  setFolderSortMode: (path: string, sortMode: FolderSortMode) => Promise<void>;
+  addToast: (message: string, kind?: Toast["kind"]) => number;
+}) {
+  const [dragID, setDragID] = useState(0);
+  const [dropActive, setDropActive] = useState(false);
+  async function reorder(targetID: number) {
+    if (!dragID || dragID === targetID) return;
+    const current = items || [];
+    const from = current.findIndex((item) => item.note.id === dragID);
+    const to = current.findIndex((item) => item.note.id === targetID);
+    if (from < 0 || to < 0) return;
+    if (sortMode !== "custom") {
+      const ok = window.confirm("Switch this folder to custom sort so you can save a manual order?");
+      if (!ok) {
+        setDragID(0);
+        return;
+      }
+      try {
+        await setFolderSortMode(folder || "/", "custom");
+      } catch (err) {
+        addToast(messageFromError(err), "error");
+        setDragID(0);
+        return;
+      }
+    }
+    const next = [...current];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setItems(next);
+    try {
+      await api.saveMoodboardOrder(csrf, folder || "/", next.map((item) => item.note.id));
+    } catch (err) {
+      setItems(current);
+      addToast(messageFromError(err), "error");
+    }
+  }
+  return (
+    <section
+      className={`moodboard-page ${mode === "gallery" ? "gallery-mode" : "moodboard-mode"} ${dropActive ? "drop-active" : ""}`}
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes("Files")) {
+          event.preventDefault();
+          setDropActive(true);
+        }
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false);
+      }}
+      onDrop={(event) => {
+        const files = Array.from(event.dataTransfer.files || []).filter((file) => file.name.trim() !== "");
+        if (files.length === 0) return;
+        event.preventDefault();
+        setDropActive(false);
+        void importFiles(files, folder || "/");
+      }}
+    >
+      <div className="search-page-head">
+        <div><h1>{folderTitle(folder)}</h1><span>{items.length.toLocaleString()} item{items.length === 1 ? "" : "s"} in {mode} view</span></div>
+        <div className="search-page-actions">{controls}</div>
+      </div>
+      <div className="moodboard-grid">
+        {items.map((item) => (
+          <article
+            key={item.note.id}
+            className="moodboard-tile"
+            draggable
+            onDragStart={(event) => { setDragID(item.note.id); event.dataTransfer.effectAllowed = "move"; }}
+            onDragOver={(event) => { if (!event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+            onDrop={(event) => {
+              if (event.dataTransfer.files.length > 0) return;
+              event.preventDefault();
+              void reorder(item.note.id);
+            }}
+          >
+            <MoodboardPreview item={item} />
+            <div className="moodboard-tile-meta">
+              <strong>{item.note.title}</strong>
+              <button type="button" className="icon-only secondary" title={tileActionLabel(item)} aria-label={tileActionLabel(item)} onClick={() => void openNote(item.note.id)}>{tileUsesViewAction(item) ? <EyeIcon /> : <PencilSimpleIcon />}</button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MoodboardPreview({ item }: { item: MoodboardItem }) {
+  const asset = item.asset;
+  const previewAsset = item.preview_asset;
+  const type = normalizedContentType(asset?.content_type || "");
+  if (previewAsset && normalizedContentType(previewAsset.content_type).startsWith("image/")) {
+    return <div className="moodboard-preview image media-preview"><img src={assetURL(previewAsset)} alt={item.note.title} /><strong>{item.note.title}</strong></div>;
+  }
+  if (asset && type.startsWith("image/")) {
+    return <div className="moodboard-preview image media-preview"><img src={assetURL(asset)} alt={item.note.title} /><strong>{item.note.title}</strong></div>;
+  }
+  if (asset && (type === "application/pdf" || asset.filename.toLowerCase().endsWith(".pdf"))) {
+    return <PDFMoodboardPreview asset={asset} title={item.note.title} />;
+  }
+  if (asset && (type === "text/html" || asset.filename.toLowerCase().endsWith(".html") || asset.filename.toLowerCase().endsWith(".htm"))) {
+    return <div className="moodboard-preview html media-preview"><iframe title={item.note.title} src={assetURL(asset)} sandbox="" /><strong>{item.note.title}</strong></div>;
+  }
+  if (asset) {
+    return <div className="moodboard-preview file"><FileTextIcon /><span>{item.note.title}</span></div>;
+  }
+  return (
+    <div className="moodboard-preview note" data-color-mode="light">
+      <div className="note-paper">
+        <MarkdownPreview source={item.version.content || " "} />
+      </div>
+    </div>
+  );
+}
+
+function tileUsesViewAction(item: MoodboardItem) {
+  const asset = item.asset;
+  if (!asset) return false;
+  const type = normalizedContentType(asset.content_type);
+  return type.startsWith("image/") || type === "application/pdf" || type === "text/html" || asset.filename.toLowerCase().endsWith(".pdf") || asset.filename.toLowerCase().endsWith(".html") || asset.filename.toLowerCase().endsWith(".htm");
+}
+
+function tileActionLabel(item: MoodboardItem) {
+  return tileUsesViewAction(item) ? "View" : "Edit";
+}
+
+function PDFMoodboardPreview({ asset, title }: { asset: Asset; title: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [failed, setFailed] = useState(false);
+  const url = assetURL(asset);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function renderPreview() {
+      setFailed(false);
+      try {
+        const res = await fetch(url, { headers: { Accept: "application/pdf" } });
+        if (!res.ok) throw new Error("PDF unavailable");
+        const data = await res.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data }).promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 1 });
+        const width = 520;
+        const scale = width / viewport.width;
+        const scaled = page.getViewport({ scale });
+        const canvas = canvasRef.current;
+        if (!canvas || cancelled) return;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Canvas unavailable");
+        canvas.width = Math.floor(scaled.width);
+        canvas.height = Math.floor(scaled.height);
+        await page.render({ canvas, canvasContext: context, viewport: scaled }).promise;
+        await pdf.destroy();
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    }
+    void renderPreview();
+    return () => { cancelled = true; };
+  }, [url]);
+
+  return (
+    <div className="moodboard-preview pdf">
+      {failed ? <><FilePdfIcon /><span>{title}</span></> : <><canvas ref={canvasRef} aria-label={title} /><strong className="media-preview-title">{title}</strong></>}
+    </div>
+  );
+}
+
+async function pdfPreviewFile(file: File): Promise<File | undefined> {
+  const type = normalizedContentType(file.type);
+  if (type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) return undefined;
+  const data = await file.arrayBuffer();
+  const blob = await renderPDFPagePreview(data, 640);
+  if (!blob) return undefined;
+  const name = `${file.name.replace(/\.[^.]+$/, "") || "pdf"}-preview.png`;
+  return new File([blob], name, { type: "image/png" });
+}
+
+async function renderPDFPagePreview(data: ArrayBuffer, width: number): Promise<Blob | undefined> {
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  try {
+    const page = await pdf.getPage(1);
+    const viewport = page.getViewport({ scale: 1 });
+    const scale = width / viewport.width;
+    const scaled = page.getViewport({ scale });
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return undefined;
+    canvas.width = Math.floor(scaled.width);
+    canvas.height = Math.floor(scaled.height);
+    await page.render({ canvas, canvasContext: context, viewport: scaled }).promise;
+    return await new Promise<Blob | undefined>((resolve) => canvas.toBlob((blob) => resolve(blob || undefined), "image/png"));
+  } finally {
+    await pdf.destroy();
+  }
+}
+
+function documentNoteAsset(headerJSON: string, assets: Asset[]): DocumentAssetView | null {
+  let parsed: { kind?: string; asset?: Partial<DocumentAssetView> & { id?: number } } = {};
+  try {
+    parsed = JSON.parse(headerJSON || "{}");
+  } catch {
+    return null;
+  }
+  if ((parsed.kind !== "document" && parsed.kind !== "webpage") || !parsed.asset) return null;
+  const byID = parsed.asset.id ? assets.find((asset) => asset.id === parsed.asset!.id) : undefined;
+  const bySlug = parsed.asset.slug ? assets.find((asset) => asset.slug === parsed.asset!.slug) : undefined;
+  const asset = byID || bySlug || parsed.asset;
+  if (!asset.slug || !asset.filename) return null;
+  return {
+    slug: asset.slug,
+    filename: asset.filename,
+    content_type: asset.content_type || "application/octet-stream",
+    size: asset.size || 0
+  };
+}
+
+function noteClipSource(headerJSON: string): { url: string; label: string } | null {
+  try {
+    const parsed = JSON.parse(headerJSON || "{}") as { clip?: { source_url?: string; page_url?: string } };
+    const url = String(parsed.clip?.page_url || parsed.clip?.source_url || "").trim();
+    if (!url) return null;
+    return { url, label: sourceHostLabel(url) };
+  } catch {
+    return null;
+  }
+}
+
+function sourceHostLabel(value: string) {
+  try {
+    const url = new URL(value);
+    return url.hostname.replace(/^www\./, "") || value;
+  } catch {
+    return value;
+  }
+}
+
+function assetURL(asset: Pick<Asset, "slug" | "filename">) {
+  return appURL(`/assets/${asset.slug}/${encodeURIComponent(asset.filename)}`);
+}
+
+function normalizedContentType(value: string) {
+  return (value || "").split(";")[0].trim().toLowerCase();
 }
 
 function RichMarkdownEditor({ content, restoreAssetMarkdown, setContent, uploadAssetURL, addToast }: { content: string; restoreAssetMarkdown: (markdown: string) => string; setContent: (value: string | ((current: string) => string)) => void; uploadAssetURL: (file: File) => Promise<string | undefined>; addToast: (message: string, kind?: Toast["kind"]) => number }) {
@@ -1592,6 +2020,7 @@ function FolderBrowser({ folders, notes, activeNoteID, selectedFolder, expandedF
   const [folderName, setFolderName] = useState("");
   const [dragTarget, setDragTarget] = useState("");
   const root = useMemo(() => buildFolderTree(folders, notes), [folders, notes]);
+  const folderModeByPath = useMemo(() => new Map((folders || []).map((folder) => [normalizeFolderPath(folder.path), folder.display_mode || "list"])), [folders]);
 
   function toggle(path: string) {
     setExpandedFolders((current) => {
@@ -1612,7 +2041,8 @@ function FolderBrowser({ folders, notes, activeNoteID, selectedFolder, expandedF
 
   function renderNode(node: FolderNode, depth: number) {
     const expanded = expandedFolders.has(node.path);
-    const hasChildren = node.children.length > 0 || node.notes.length > 0;
+    const isMoodboard = folderModeByPath.get(node.path) === "moodboard";
+    const hasChildren = !isMoodboard && (node.children.length > 0 || node.notes.length > 0);
     const selected = selectedFolder === node.path || (node.path === "/" && selectedFolder === "");
     return (
       <div className="folder-node" key={node.path}>
@@ -1630,7 +2060,7 @@ function FolderBrowser({ folders, notes, activeNoteID, selectedFolder, expandedF
           onDrop={(event) => {
             event.preventDefault();
             setDragTarget("");
-            const files = Array.from(event.dataTransfer.files || []).filter((file) => /\.(md|zip)$/i.test(file.name));
+            const files = Array.from(event.dataTransfer.files || []).filter((file) => file.name.trim() !== "");
             if (files.length > 0) {
               requestImport(files, node.path);
               return;
@@ -1653,7 +2083,7 @@ function FolderBrowser({ folders, notes, activeNoteID, selectedFolder, expandedF
             {expanded ? <CaretDownIcon /> : <CaretRightIcon />}
           </button>
           <button type="button" className="folder-label ghost" onClick={() => { setSelectedFolder(node.path); setExpandedFolders((current) => expandAncestors(current, node.path)); }}>
-            <FolderIcon />{node.path === "/" ? "All Notes" : node.name}
+            {isMoodboard ? <SquaresFourIcon /> : <FolderIcon />}{node.path === "/" ? "All Notes" : node.name}{isMoodboard ? <span className="folder-mode-badge">Board</span> : null}
             <span className="folder-count">{node.noteCount}</span>
           </button>
           <button type="button" className="folder-add ghost" title="New folder" onClick={() => { setCreatingUnder(node.path); setFolderName(""); setExpandedFolders((current) => expandAncestors(current, node.path)); }}>
@@ -1667,7 +2097,7 @@ function FolderBrowser({ folders, notes, activeNoteID, selectedFolder, expandedF
             <button type="button" className="icon-only ghost folder-create-action" title="Cancel" aria-label="Cancel" onClick={() => setCreatingUnder(null)}>×</button>
           </form>
         ) : null}
-        {expanded ? (
+        {expanded && !isMoodboard ? (
           <div className="folder-children">
             {node.children.map((child) => renderNode(child, depth + 1))}
             {node.notes.map((note) => (
@@ -1702,7 +2132,7 @@ function FolderBrowser({ folders, notes, activeNoteID, selectedFolder, expandedF
                     void openNote(note.id);
                   }}
                 >
-                  <strong><FileTextIcon className="document-note-icon" />{note.is_encrypted ? <LockIcon className="encrypted-note-icon" /> : null}{note.is_shared ? <ShareNetworkIcon className="shared-badge" /> : null}<NoteTitle note={note} securityUnlocked={securityUnlocked} /></strong>
+                  <strong><SidebarNoteIcon note={note} />{note.is_encrypted ? <LockIcon className="encrypted-note-icon" /> : null}{note.is_shared ? <ShareNetworkIcon className="shared-badge" /> : null}<NoteTitle note={note} securityUnlocked={securityUnlocked} /></strong>
                   <span>{formatSidebarDate(note.updated_at, dateFormat)}</span>
                 </button>
               </div>
@@ -1993,6 +2423,10 @@ function SettingsView({ csrf, user, updateUser, templates, initialTemplateID, se
   const [dateFormat, setDateFormat] = useState(user.date_format || "ymd_slash");
   const [theme, setTheme] = useState<AppTheme>(themeFromValue(user.theme));
   const [profileSaving, setProfileSaving] = useState(false);
+  const [apiTokens, setAPITokens] = useState<APIToken[]>([]);
+  const [tokenName, setTokenName] = useState("Chrome clipping tool");
+  const [rawToken, setRawToken] = useState("");
+  const [tokenBusy, setTokenBusy] = useState(false);
   const [storage, setStorage] = useState<"browser" | "server">("browser");
   const [passphrase, setPassphrase] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -2062,6 +2496,69 @@ function SettingsView({ csrf, user, updateUser, templates, initialTemplateID, se
     } finally {
       setProfileSaving(false);
     }
+  }
+
+  const loadTokens = useCallback(async () => {
+    const data = await api.tokens();
+    setAPITokens(data.tokens || []);
+  }, []);
+
+  useEffect(() => {
+    void loadTokens().catch((err) => addToast(messageFromError(err), "error"));
+  }, [addToast, loadTokens]);
+
+  async function createAPIToken() {
+    setTokenBusy(true);
+    try {
+      const data = await api.createToken(csrf, tokenName || "Chrome clipping tool");
+      setRawToken(data.raw_token);
+      setAPITokens((items) => [data.token, ...items]);
+      addToast("API token created.");
+    } finally {
+      setTokenBusy(false);
+    }
+  }
+
+  async function copyRawToken() {
+    if (!rawToken) return;
+    await navigator.clipboard.writeText(rawToken);
+    addToast("Token copied.");
+  }
+
+  async function sendSetupToExtension() {
+    if (!rawToken) {
+      addToast("Create a token first, then send it to the installed extension.", "error");
+      return;
+    }
+    const baseUrl = new URL(appURL("/"), window.location.origin).href.replace(/\/+$/, "");
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        reject(new Error("No extension response. Install or reload the extension, refresh this page, then try again."));
+      }, 2500);
+      function onMessage(event: MessageEvent) {
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        const message = event.data as { type?: string; ok?: boolean; error?: string };
+        if (message?.type !== "CAIRNFIELD_CLIPPER_SETUP_RESULT") return;
+        window.clearTimeout(timer);
+        window.removeEventListener("message", onMessage);
+        if (message.ok) {
+          resolve();
+        } else {
+          reject(new Error(message.error || "The extension rejected the setup payload."));
+        }
+      }
+      window.addEventListener("message", onMessage);
+      window.postMessage({ type: "CAIRNFIELD_CLIPPER_SETUP", baseUrl, token: rawToken }, window.location.origin);
+    });
+    addToast("Extension configured.");
+  }
+
+  async function revokeAPIToken(token: APIToken) {
+    if (!window.confirm(`Revoke the "${token.name}" API token?`)) return;
+    await api.revokeToken(csrf, token.id);
+    await loadTokens();
+    addToast("API token revoked.");
   }
 
   const loadBackups = useCallback(async () => {
@@ -2172,6 +2669,45 @@ function SettingsView({ csrf, user, updateUser, templates, initialTemplateID, se
           </label>
           <button type="submit" disabled={profileSaving || (dateFormat === (user.date_format || "ymd_slash") && theme === themeFromValue(user.theme))}><FloppyDiskIcon />{profileSaving ? "Saving..." : "Save profile"}</button>
         </form>
+      </section>
+      <section className="panel api-token-panel">
+        <div className="template-head">
+          <div><h1>API tokens</h1><p className="muted">Create revocable tokens for browser extensions and other trusted tools.</p></div>
+        </div>
+        <form className="api-token-form" onSubmit={(event) => { event.preventDefault(); void createAPIToken().catch((err) => addToast(messageFromError(err), "error")); }}>
+          <label>Token name<input value={tokenName} onChange={(event) => setTokenName(event.target.value)} placeholder="Chrome clipping tool" /></label>
+          <button type="submit" disabled={tokenBusy || tokenName.trim() === ""}><KeyIcon />{tokenBusy ? "Creating..." : "Create token"}</button>
+        </form>
+        <div className="extension-install-row">
+          <div><strong>Chrome extension</strong><small>Download, load unpacked in Chrome, then send setup from this page.</small></div>
+          <div className="extension-install-actions">
+            <a className="button secondary" href={api.extensionZipURL()}><DownloadSimpleIcon />Download extension</a>
+            <button type="button" className="secondary" disabled={!rawToken} onClick={() => void sendSetupToExtension().catch((err) => addToast(messageFromError(err), "error"))}><ShareNetworkIcon />Send setup</button>
+          </div>
+        </div>
+        {rawToken ? (
+          <div className="api-token-once">
+            <div><strong>Copy this token now.</strong><small>It will not be shown again after you leave this screen.</small></div>
+            <code>{rawToken}</code>
+            <button type="button" className="secondary" onClick={() => void copyRawToken().catch((err) => addToast(messageFromError(err), "error"))}>Copy</button>
+          </div>
+        ) : null}
+        <div className="token-list">
+          {apiTokens.length === 0 ? <div className="empty-key-row"><KeyIcon />No API tokens yet</div> : apiTokens.map((token) => {
+            const revoked = Boolean(token.revoked_at);
+            return (
+              <div className={`token-row ${revoked ? "revoked" : ""}`} key={token.id}>
+                <KeyIcon className="key-row-icon" />
+                <div className="key-row-head">
+                  <div><strong>{token.name}</strong><small>Created {formatDateTime(token.created_at)} · {token.last_used_at ? `Last used ${formatDateTime(token.last_used_at)}` : "Never used"} · {revoked ? `Revoked ${formatDateTime(token.revoked_at || "")}` : "Active"}</small></div>
+                  <div className="key-actions">
+                    {!revoked ? <button type="button" className="icon-only secondary" title="Revoke token" aria-label="Revoke token" onClick={() => void revokeAPIToken(token).catch((err) => addToast(messageFromError(err), "error"))}><TrashIcon /></button> : null}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </section>
       <section className="panel template-editor-panel">
         <div className="template-head">
@@ -2367,6 +2903,39 @@ function isInFolderTree(notePath: string, folderPath: string) {
   return folder === "/" || noteFolder === folder || noteFolder.startsWith(`${folder}/`);
 }
 
+function currentFolderMode(folders: FolderRecord[], path: string): FolderDisplayMode {
+  if (path === "__trash" || path === "__starred") return "list";
+  return (folders || []).find((folder) => normalizeFolderPath(folder.path) === normalizeFolderPath(path || "/"))?.display_mode || "list";
+}
+
+function sortNoteSummaries(notes: NoteSummary[], sortMode: FolderSortMode) {
+  const list = [...(notes || [])];
+  switch (sortMode) {
+    case "oldest":
+      return list.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id);
+    case "alphabetical":
+      return list.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }) || a.id - b.id);
+    case "custom":
+      return list;
+    case "newest":
+    default:
+      return list.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
+  }
+}
+
+function folderSortLabel(sortMode: FolderSortMode) {
+  return folderSortModes.find((option) => option.value === sortMode)?.label || "Newest";
+}
+
+function folderHasChildFolders(folders: FolderRecord[], path: string) {
+  const current = normalizeFolderPath(path || "/");
+  const prefix = current === "/" ? "/" : `${current}/`;
+  return (folders || []).some((folder) => {
+    const child = normalizeFolderPath(folder.path);
+    return child !== current && child.startsWith(prefix);
+  });
+}
+
 function currentNoteTargetFolder(folder: string) {
   if (!folder || folder.startsWith("__")) return "/";
   return normalizeFolderPath(folder);
@@ -2414,8 +2983,12 @@ function expandAncestors(current: Set<string>, path: string) {
 
 function upsertFolder(items: FolderRecord[], folder: FolderRecord) {
   const path = normalizeFolderPath(folder.path);
-  if ((items || []).some((item) => normalizeFolderPath(item.path) === path)) return items;
-  return [...(items || []), { ...folder, path }].sort((a, b) => a.path.localeCompare(b.path));
+  const normalized = { ...folder, path };
+  const existing = items || [];
+  if (existing.some((item) => normalizeFolderPath(item.path) === path)) {
+    return existing.map((item) => normalizeFolderPath(item.path) === path ? { ...item, ...normalized } : item).sort((a, b) => a.path.localeCompare(b.path));
+  }
+  return [...existing, normalized].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function insertAtEnd(current: string, markdown: string) {
@@ -2658,6 +3231,30 @@ function NoteTitle({ note, securityUnlocked }: { note: NoteSummary; securityUnlo
   return <EncryptedTitleOvals noteID={note.id} />;
 }
 
+function SidebarNoteIcon({ note }: { note: NoteSummary }) {
+  const doc = noteDocumentInfo(note.header_json || "");
+  if (doc.kind === "webpage") return <BrowserIcon className="document-note-icon" />;
+  const type = doc.contentType;
+  if (type === "text/html") return <BrowserIcon className="document-note-icon" />;
+  if (type.startsWith("image/")) return <ImageIcon className="document-note-icon" />;
+  if (type === "application/pdf") return <FilePdfIcon className="document-note-icon" />;
+  return <FileTextIcon className="document-note-icon" />;
+}
+
+function noteDocumentContentType(headerJSON: string) {
+  return noteDocumentInfo(headerJSON).contentType;
+}
+
+function noteDocumentInfo(headerJSON: string) {
+  try {
+    const parsed = JSON.parse(headerJSON || "{}") as { kind?: string; asset?: { content_type?: string } };
+    if (parsed.kind === "document" || parsed.kind === "webpage") return { kind: parsed.kind, contentType: normalizedContentType(parsed.asset?.content_type || "") };
+  } catch {
+    // Plain notes do not need type-specific icons.
+  }
+  return { kind: "", contentType: "" };
+}
+
 function EncryptedTitleOvals({ noteID }: { noteID: number }) {
   const widths = encryptedTitleWidths(noteID);
   return (
@@ -2848,9 +3445,40 @@ function searchRouteFromLocation() {
   return { query, page: Math.max(1, Number(params.get("page")) || 1) };
 }
 
+function folderPathFromLocation() {
+  const parts = appPathname().split("/").filter(Boolean);
+  if (parts[0] !== "folders") return { path: "", page: 1 };
+  const decoded = parts.slice(1).map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  });
+  const params = new URLSearchParams(window.location.search);
+  return { path: normalizeFolderPath(decoded.join("/") || "/"), page: Math.max(1, Number(params.get("page")) || 1) };
+}
+
 function noteURL(note: Note) {
   const slug = note.slug || String(note.id);
   return appURL(`/notes/${slug}/${urlSegment(note.title)}`);
+}
+
+function folderURL(path: string, page = 1) {
+  const normalized = normalizeFolderPath(path || "/");
+  const segments = normalized === "/" ? [] : normalized.split("/").filter(Boolean).map(encodeURIComponent);
+  const params = new URLSearchParams();
+  if (page > 1) params.set("page", String(page));
+  const query = params.toString();
+  return appURL(`/folders${segments.length ? `/${segments.join("/")}` : ""}${query ? `?${query}` : ""}`);
+}
+
+function pushFolderHistory(path: string, page: number, historyMode: "push" | "replace" | "none") {
+  if (historyMode === "none" || path === "__trash" || path === "__starred") return;
+  const url = folderURL(path || "/", page);
+  if (`${window.location.pathname}${window.location.search}` !== url) {
+    window.history[historyMode === "replace" ? "replaceState" : "pushState"]({ folder: normalizeFolderPath(path || "/") }, "", url);
+  }
 }
 
 function searchURL(query: string, page = 1) {

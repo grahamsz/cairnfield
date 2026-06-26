@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Cairnfield Clipper Options</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Cairnfield Clipper</h1>
+      <form id="options-form">
+        <label>Cairnfield URL<input id="base-url" type="url" placeholder="https://notes.example.com" required /></label>
+        <label>API token<input id="token" type="password" autocomplete="off" placeholder="cairnfield_..." required /></label>
+        <div class="actions">
+          <button type="submit">Save</button>
+          <button id="test" type="button" class="secondary">Test connection</button>
+        </div>
+      </form>
+      <p id="status" role="status"></p>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

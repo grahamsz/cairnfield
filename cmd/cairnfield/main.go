@@ -35,6 +35,9 @@ func run() error {
 		return err
 	}
 	defer searchService.Close()
+	if err := rebuildSearchIndexes(context.Background(), db, searchService); err != nil {
+		return err
+	}
 
 	handler := web.New(web.Options{
 		Store:        db,
@@ -62,4 +65,21 @@ func run() error {
 		return nil
 	}
 	return err
+}
+
+func rebuildSearchIndexes(ctx context.Context, db *store.Store, searchService *search.Service) error {
+	users, err := db.ListUsers(ctx)
+	if err != nil {
+		return err
+	}
+	for _, user := range users {
+		docs, err := db.SearchDocumentsForCurrentNotes(ctx, user.ID)
+		if err != nil {
+			return err
+		}
+		if err := searchService.Rebuild(ctx, user.ID, docs); err != nil {
+			return err
+		}
+	}
+	return nil
 }

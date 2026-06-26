@@ -24,6 +24,8 @@ type Service struct {
 	writers map[int64]*sync.Mutex
 }
 
+const indexVersion = "bleve-v2"
+
 type Hit struct {
 	ID    int64   `json:"id"`
 	Score float64 `json:"score"`
@@ -63,7 +65,7 @@ func (s *Service) indexForUser(userID int64) (bleve.Index, error) {
 		return idx, nil
 	}
 	s.mu.Unlock()
-	idx, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), "bleve"))
+	idx, err := openIndex(filepath.Join(s.root, strconv.FormatInt(userID, 10), indexVersion))
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +94,7 @@ func openIndex(path string) (bleve.Index, error) {
 	for _, field := range []string{"user_id", "folder_path", "is_encrypted", "is_shared", "has_image"} {
 		doc.AddFieldMappingsAt(field, keywordField())
 	}
-	for _, field := range []string{"title", "title_compound", "content", "headers", "tags", "path_text", "compound"} {
+	for _, field := range []string{"title", "title_compound", "content", "headers", "tags", "path_text", "asset_text", "compound"} {
 		doc.AddFieldMappingsAt(field, textField())
 	}
 	doc.AddFieldMappingsAt("updated_at", dateField())
@@ -152,12 +154,13 @@ func (s *Service) Index(ctx context.Context, doc store.SearchDocument) error {
 		"path_text":      strings.ReplaceAll(strings.Trim(doc.FolderPath, "/"), "/", " "),
 		"content":        doc.Content,
 		"headers":        doc.HeaderJSON,
+		"asset_text":     doc.AssetText,
 		"tags":           tagsFromHeader(doc.HeaderJSON),
 		"updated_at":     doc.UpdatedAt,
 		"is_encrypted":   strconv.FormatBool(doc.Encrypted),
 		"is_shared":      strconv.FormatBool(doc.Shared),
 		"has_image":      strconv.FormatBool(doc.HasImage),
-		"compound":       compound(doc.Title, doc.FolderPath, doc.Content, doc.HeaderJSON),
+		"compound":       compound(doc.Title, doc.FolderPath, doc.Content, doc.HeaderJSON, doc.AssetText),
 	})
 }
 
@@ -190,12 +193,13 @@ func (s *Service) Rebuild(ctx context.Context, userID int64, docs []store.Search
 			"path_text":      strings.ReplaceAll(strings.Trim(d.FolderPath, "/"), "/", " "),
 			"content":        d.Content,
 			"headers":        d.HeaderJSON,
+			"asset_text":     d.AssetText,
 			"tags":           tagsFromHeader(d.HeaderJSON),
 			"updated_at":     d.UpdatedAt,
 			"is_encrypted":   strconv.FormatBool(d.Encrypted),
 			"is_shared":      strconv.FormatBool(d.Shared),
 			"has_image":      strconv.FormatBool(d.HasImage),
-			"compound":       compound(d.Title, d.FolderPath, d.Content, d.HeaderJSON),
+			"compound":       compound(d.Title, d.FolderPath, d.Content, d.HeaderJSON, d.AssetText),
 		})
 	}
 	writer := s.writerForUser(userID)
@@ -255,6 +259,7 @@ func buildQuery(userID int64, raw string) blevequery.Query {
 			match("title", text, 3.5),
 			match("title_compound", compound(text), 4),
 			match("content", text, 1),
+			match("asset_text", text, 1.2),
 			match("headers", text, .8),
 			match("path_text", text, 1.2),
 			match("compound", text, 1.4),
