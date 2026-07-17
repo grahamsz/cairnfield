@@ -124,6 +124,38 @@ only covers notes the caller **owns** (encrypted notes are never indexed).
 Used by the SPA's IndexedDB offline mode — see
 [frontend.md](frontend.md#offline-support).
 
+## Live presence (WebSocket)
+
+`GET /ws` — session cookie auth (no CSRF, GET upgrade), mounted outside
+`/api/` so no 15s timeout; the `Origin` header must match the host. Uses
+`github.com/coder/websocket`.
+
+Client → server:
+
+```json
+{"type":"watch","note_id":123,"editing":false}
+{"type":"unwatch","note_id":123}
+```
+
+Server → client:
+
+```json
+{"type":"presence","note_id":123,"participants":[{"user_id":2,"name":"Bob","email":"b@x","same_user":false,"editing":true,"sessions":1}]}
+{"type":"note_saved","note_id":123,"version_id":456,"title":"T","by_user_id":2,"by_name":"Bob","by_email":"b@x","saved_at":1721320000}
+{"type":"error","message":"note not accessible"}
+```
+
+- `presence` is sent to every watcher of the note whenever the watch/editing
+  set changes. It excludes the receiving connection itself; the recipient's
+  other sessions appear as one entry with `same_user: true` and a `sessions`
+  count. `editing` is OR-ed across a user's connections.
+- `note_saved` is broadcast to all watchers of the note (including the
+  saver's connections) after a successful non-conflict save or version
+  restore.
+- Watching requires note access (owner or share recipient); inaccessible
+  notes are rejected with an `error` message.
+- The server pings every 30s; message read limit is 4 KB.
+
 ## Web clipping (extension)
 
 Bearer-token only (API token), CSRF-exempt, multipart. See

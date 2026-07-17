@@ -40,6 +40,7 @@ type Server struct {
 	store        *store.Store
 	blobs        *blob.Store
 	search       *search.Service
+	wsHub        *wsHub
 	sessionTTL   time.Duration
 	cookieSecure bool
 	basePath     string
@@ -71,7 +72,7 @@ func New(opts Options) *Server {
 	if opts.SessionTTL <= 0 {
 		opts.SessionTTL = 30 * 24 * time.Hour
 	}
-	srv := &Server{store: opts.Store, blobs: opts.Blobs, search: opts.Search, sessionTTL: opts.SessionTTL, cookieSecure: opts.CookieSecure, basePath: normalizeBasePath(opts.BasePath), staticDir: opts.StaticDir, oidc: opts.OIDC.WithDefaults()}
+	srv := &Server{store: opts.Store, blobs: opts.Blobs, search: opts.Search, wsHub: newWSHub(), sessionTTL: opts.SessionTTL, cookieSecure: opts.CookieSecure, basePath: normalizeBasePath(opts.BasePath), staticDir: opts.StaticDir, oidc: opts.OIDC.WithDefaults()}
 	srv.startBackupCleanup()
 	return srv
 }
@@ -82,6 +83,8 @@ func (s *Server) Handler() http.Handler {
 	appMux.HandleFunc("/assets/", s.handleAsset)
 	appMux.HandleFunc("/android/latest.json", s.handleAndroidLatest)
 	appMux.HandleFunc("/android/cairnfield.apk", s.handleAndroidAPK)
+	// /ws lives outside /api/ so the 15s API request timeout does not kill long-lived connections.
+	appMux.HandleFunc("/ws", s.handleWS)
 	appMux.HandleFunc("/", s.handleSPA)
 	var handler http.Handler = appMux
 	if s.basePath != "" {
@@ -735,6 +738,7 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 			}
 			if !conflict {
 				s.indexCurrent(r.Context(), note, version)
+				s.wsHub.broadcastNoteSaved(note.ID, version.ID, note.Title, cu.User, noteSavedAt(version))
 			}
 			writeJSON(w, map[string]any{"note": note, "version": version, "conflict": conflict})
 		default:
@@ -850,6 +854,7 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 			writeStoreError(w, err)
 			return
 		}
+		s.wsHub.broadcastNoteSaved(note.ID, version.ID, note.Title, cu.User, noteSavedAt(version))
 		writeJSON(w, map[string]any{"note": note, "version": version})
 	case "star":
 		if id == 0 {

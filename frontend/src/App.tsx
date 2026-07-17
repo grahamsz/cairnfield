@@ -70,11 +70,12 @@ import { api, messageFromError } from "./api";
 import { appPathname, appURL } from "./base";
 import { decryptBytes, decryptText, downloadKey, encryptBytes, encryptText, generateKey, passphraseIssues, privateKeyMetadata, verifyPrivateKey } from "./crypto";
 import { deleteOfflineNote, loadBrowserPGPKey, loadOfflineBootstrap, loadOfflineSync, noteSummaryFromSync, offlineNote, pendingEdits, queueEdit, removePendingEdits, replaceOfflineFolders, saveBrowserPGPKey, saveOfflineBootstrap, saveOfflineSync, upsertOfflineFolder, upsertOfflineNote, type PendingOperation } from "./offline";
+import { presenceClient, type PresenceParticipant } from "./presence";
 import type { APIToken, Asset, AuthProvider, BackupExport, Bootstrap, EncryptionKey, FolderRecord, MoodboardItem, Note, NoteDetail, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerURL;
 
-type Toast = { id: number; message: string; kind: "success" | "error" | "loading" };
+type Toast = { id: number; message: string; kind: "success" | "error" | "loading" | "warning" };
 type View = "editor" | "folder" | "search" | "settings" | "admin";
 type EditorMode = "rich" | "raw" | "history" | "share";
 type SaveCause = "auto" | "manual";
@@ -87,7 +88,6 @@ type SecurityUnlock = { keyID: number; label: string; fingerprint: string; publi
 type EditorSnapshot = { activeNote: Note; version: NoteVersion; title: string; folder: string; content: string; headerJSON: string; encrypted: boolean; plainUnlocked: boolean; securityUnlock: SecurityUnlock | null; defaultKey: EncryptionKey | null; signature: string };
 type DateFormatOption = { value: string; label: string; sample: string };
 type SyncPushResult = { op?: "create" | "update"; client_id?: string; note_id?: number; note?: Note; version?: NoteVersion; conflict?: boolean; error?: string };
-type BeforeInstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }> };
 
 let toastSeq = 1;
 const appLockChannelName = "cairnfield-lock";
@@ -117,6 +117,7 @@ export default function App() {
   const [folders, setFolders] = useState<FolderRecord[]>([]);
   const [activeNote, setActiveNote] = useState<Note | null>(null);
   const [version, setVersion] = useState<NoteVersion | null>(null);
+  const [presence, setPresence] = useState<PresenceParticipant[]>([]);
   const [shares, setShares] = useState<Share[]>([]);
   const [activeAssets, setActiveAssets] = useState<Asset[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -143,9 +144,12 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [offlineMode, setOfflineMode] = useState(!navigator.onLine);
   const [appTheme, setAppTheme] = useState<AppTheme>(() => themeFromValue(window.localStorage.getItem("cairnfield-theme")));
-  const [androidInstallPrompt, setAndroidInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const isAndroidUA = useMemo(() => /\bAndroid\b/i.test(navigator.userAgent || ""), []);
   const decryptedTitleCache = useRef<Map<number, string>>(new Map());
+  const presenceDirtyRef = useRef(false);
+  const watchedNoteIDRef = useRef(0);
+  const versionRef = useRef<NoteVersion | null>(null);
+  const knownVersionIDsRef = useRef<Set<number>>(new Set());
 
   const csrf = bootstrap?.csrf || "";
   const user = bootstrap?.user || null;
@@ -159,28 +163,6 @@ export default function App() {
     if (kind !== "loading") window.setTimeout(() => setToasts((items) => items.filter((t) => t.id !== id)), 4200);
     return id;
   }, []);
-
-  useEffect(() => {
-    function beforeInstallPrompt(event: Event) {
-      if (!isAndroidUA) return;
-      event.preventDefault();
-      setAndroidInstallPrompt(event as BeforeInstallPromptEvent);
-    }
-    window.addEventListener("beforeinstallprompt", beforeInstallPrompt);
-    return () => window.removeEventListener("beforeinstallprompt", beforeInstallPrompt);
-  }, [isAndroidUA]);
-
-  async function installAndroidApp() {
-    if (!androidInstallPrompt) {
-      addToast("Use your browser menu to install Cairnfield on Android.", "error");
-      return;
-    }
-    const prompt = androidInstallPrompt;
-    setAndroidInstallPrompt(null);
-    await prompt.prompt();
-    const choice = await prompt.userChoice;
-    if (choice.outcome === "accepted") addToast("Cairnfield install started.");
-  }
 
   const applyOfflineSync = useCallback((data: SyncBootstrap) => {
     const list = (data.notes || []).map(noteSummaryFromSync);
@@ -349,6 +331,52 @@ export default function App() {
       addToast(messageFromError(err), "error");
     }
   }, [addToast, unlocked]);
+
+  useEffect(() => {
+    versionRef.current = version;
+    if (version) knownVersionIDsRef.current.add(version.id);
+  }, [version]);
+
+  useEffect(() => {
+    const noteID = activeNote?.id || 0;
+    presenceDirtyRef.current = false;
+    watchedNoteIDRef.current = noteID;
+    knownVersionIDsRef.current = new Set(versionRef.current ? [versionRef.current.id] : []);
+    setPresence([]);
+    if (!noteID || !user) return;
+    const offPresence = presenceClient.onPresence((message) => {
+      if (message.note_id === noteID) setPresence(message.participants || []);
+    });
+    const offSaved = presenceClient.onNoteSaved((message) => {
+      if (message.note_id !== noteID) return;
+      // The server echoes this tab's own saves too, and the broadcast can beat
+      // the save response, so re-check known versions after a short delay.
+      window.setTimeout(() => {
+        if (watchedNoteIDRef.current !== noteID || knownVersionIDsRef.current.has(message.version_id)) return;
+        const name = message.by_name || "Someone";
+        if (presenceDirtyRef.current) {
+          addToast(`${name} saved changes to this note — your next save may conflict.`, "warning");
+          return;
+        }
+        void openNote(noteID, "none");
+        addToast(`${name} updated this note.`);
+      }, 400);
+    });
+    presenceClient.watch(noteID, false);
+    return () => {
+      offPresence();
+      offSaved();
+      presenceClient.unwatch(noteID);
+      if (watchedNoteIDRef.current === noteID) watchedNoteIDRef.current = 0;
+      setPresence([]);
+    };
+  }, [activeNote?.id, addToast, openNote, user]);
+
+  const handleDirtyChange = useCallback((dirty: boolean) => {
+    presenceDirtyRef.current = dirty;
+    const noteID = activeNote?.id || 0;
+    if (noteID) presenceClient.watch(noteID, dirty);
+  }, [activeNote?.id]);
 
   const executeSearch = useCallback(async (searchQuery: string, historyMode: "push" | "replace" | "none" = "push", page = 1) => {
     const trimmed = searchQuery.trim();
@@ -984,7 +1012,7 @@ export default function App() {
             event.preventDefault();
             void trashDraggedNotes(noteIDsFromDragEvent(event));
           }}><TrashIcon />Trash</button>
-          {isAndroidUA && !isNativeAndroid() ? <AndroidInstallCard canPrompt={Boolean(androidInstallPrompt)} onInstall={() => void installAndroidApp().catch((err) => addToast(messageFromError(err), "error"))} /> : null}
+          {isAndroidUA && !isNativeAndroid() ? <AndroidInstallCard /> : null}
         </aside>
         <button type="button" className="sidebar-resizer" aria-label="Resize sidebar" onPointerDown={beginSidebarResize} />
         <main className="content">
@@ -993,7 +1021,7 @@ export default function App() {
             view === "search" ? <NoteListView csrf={csrf} title="Search" subtitle={`${searchResults.length.toLocaleString()} result${searchResults.length === 1 ? "" : "s"} on page ${searchPage} for ${query}${offlineMode ? " - Offline search is limited" : ""}`} results={searchResults} setResults={setSearchResults} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} highlight={query} addToast={addToast} page={searchPage} hasMore={searchHasMore} onPageChange={(page) => executeSearch(query, "push", page)} offlineMode={offlineMode} /> :
             view === "folder" && (folderViewMode === "gallery" || folderViewMode === "moodboard") && folder !== "__trash" && folder !== "__starred" ? <MoodboardView folder={folder} mode={folderViewMode} sortMode={activeFolderSortMode} controls={folderControls} items={moodboardItems} setItems={setMoodboardItems} csrf={csrf} openNote={openNote} importFiles={importFiles} setFolderSortMode={setFolderSortMode} addToast={addToast} /> :
             view === "folder" ? <NoteListView csrf={csrf} title={folderTitle(folder)} subtitle={`${folderNotes.length.toLocaleString()} note${folderNotes.length === 1 ? "" : "s"} on page ${folderPage}, ${folderSortLabel(activeFolderSortMode).toLowerCase()} first`} results={folderNotes} setResults={setFolderNotes} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} addToast={addToast} page={folderPage} hasMore={folderHasMore} onPageChange={(page) => openFolder(folder, page)} action={folder === "__trash" ? <button type="button" className="secondary danger-action" disabled={folderNotes.length === 0} onClick={() => void emptyTrash()}><TrashIcon />Empty trash</button> : folderControls} /> :
-            <EditorView csrf={csrf} user={user} activeNote={activeNote} version={version} assets={activeAssets} shares={shares} defaultKey={defaultKey} securityUnlock={unlocked} openUnlock={() => setSecurityUnlockOpen(true)} rememberDecryptedTitle={(id, title) => decryptedTitleCache.current.set(id, title)} setActiveNote={setActiveNote} setVersion={setVersion} setShares={setShares} setActiveAssets={setActiveAssets} setNotes={setNotes} reloadNotes={loadNotes} addToast={addToast} offlineMode={offlineMode} />}
+            <EditorView csrf={csrf} user={user} activeNote={activeNote} version={version} assets={activeAssets} shares={shares} defaultKey={defaultKey} securityUnlock={unlocked} openUnlock={() => setSecurityUnlockOpen(true)} rememberDecryptedTitle={(id, title) => decryptedTitleCache.current.set(id, title)} setActiveNote={setActiveNote} setVersion={setVersion} setShares={setShares} setActiveAssets={setActiveAssets} setNotes={setNotes} reloadNotes={loadNotes} addToast={addToast} offlineMode={offlineMode} presence={presence} onDirtyChange={handleDirtyChange} />}
         </main>
       </div>
       {importRequest ? <ImportApprovalDialog request={importRequest} onCancel={() => setImportRequest(null)} onApprove={() => { const req = importRequest; setImportRequest(null); void importFiles(req.files, req.folderPath); }} /> : null}
@@ -1019,7 +1047,7 @@ function LoadingStones() {
   );
 }
 
-function AndroidInstallCard({ canPrompt, onInstall }: { canPrompt: boolean; onInstall: () => void }) {
+function AndroidInstallCard() {
   return (
     <section className="android-install-card">
       <div className="android-install-mark"><img src={appURL("/icon.svg")} alt="" /></div>
@@ -1027,10 +1055,7 @@ function AndroidInstallCard({ canPrompt, onInstall }: { canPrompt: boolean; onIn
         <strong>cairnfield Android app</strong>
         <small>Native app with offline support. Sideload the APK, then enter this server's URL.</small>
       </div>
-      <div className="android-install-actions">
-        <a className="button secondary" href={appURL("/android/cairnfield.apk")} download="cairnfield.apk">Install app</a>
-        {canPrompt ? <button type="button" className="link" onClick={onInstall}>or add to home screen</button> : null}
-      </div>
+      <a className="button secondary" href={appURL("/android/cairnfield.apk")} download="cairnfield.apk">Install app</a>
     </section>
   );
 }
@@ -1134,7 +1159,7 @@ function AuthForm({ title, submitLabel, loginOnly = false, authProviders = [], o
   );
 }
 
-function EditorView({ csrf, user, activeNote, version, assets, shares, defaultKey, securityUnlock, openUnlock, rememberDecryptedTitle, setActiveNote, setVersion, setShares, setActiveAssets, setNotes, reloadNotes, addToast, offlineMode }: {
+function EditorView({ csrf, user, activeNote, version, assets, shares, defaultKey, securityUnlock, openUnlock, rememberDecryptedTitle, setActiveNote, setVersion, setShares, setActiveAssets, setNotes, reloadNotes, addToast, offlineMode, presence, onDirtyChange }: {
   csrf: string;
   user: User;
   activeNote: Note | null;
@@ -1153,6 +1178,8 @@ function EditorView({ csrf, user, activeNote, version, assets, shares, defaultKe
   reloadNotes: () => Promise<void>;
   addToast: (message: string, kind?: Toast["kind"]) => number;
   offlineMode: boolean;
+  presence: PresenceParticipant[];
+  onDirtyChange: (dirty: boolean) => void;
 }) {
   const [mode, setMode] = useState<EditorMode>("rich");
   const [title, setTitle] = useState("");
@@ -1414,6 +1441,10 @@ function EditorView({ csrf, user, activeNote, version, assets, shares, defaultKe
     };
   }, [activeNote?.id, flushSnapshot]);
 
+  useEffect(() => {
+    onDirtyChange(status === "dirty" || status === "saving" || status === "offline");
+  }, [onDirtyChange, status]);
+
   const restoreAssetMarkdown = useCallback((markdown: string) => restoreAssetURLs(unprefixAssetURLs(markdown), assetURLMapRef.current), []);
 
   useEffect(() => {
@@ -1574,6 +1605,7 @@ function EditorView({ csrf, user, activeNote, version, assets, shares, defaultKe
             {clipSource ? <a className="source-chip" href={clipSource.url} target="_blank" rel="noreferrer" title={clipSource.url}><BrowserIcon />{clipSource.label}</a> : null}
             {encrypted ? <span className="pgp-status-chip"><LockIcon />PGP encrypted {plainUnlocked ? "unlocked" : "locked"}</span> : null}
             {status !== "idle" ? <span className={`save-state ${status}`}>{saveLabel(status)}</span> : null}
+            {presence.length > 0 ? <span className={`presence-chip${presence.some((p) => p.editing) ? " warning" : ""}`}>{presenceLabel(presence)}</span> : null}
           </div>
         </div>
         <div className="editor-actions">
@@ -3060,6 +3092,21 @@ function saveLabel(status: "idle" | "dirty" | "saving" | "saved" | "offline") {
     case "offline": return "Offline queue";
     default: return "";
   }
+}
+
+function presenceName(participant: PresenceParticipant) {
+  const name = (participant.name || "").trim();
+  if (name) return name.split(/\s+/)[0];
+  return (participant.email || "").split("@")[0] || "Someone";
+}
+
+function presenceLabel(presence: PresenceParticipant[]) {
+  const editing = presence.some((p) => p.editing);
+  const others = [...new Set(presence.filter((p) => !p.same_user).map(presenceName))];
+  const parts: string[] = [];
+  if (presence.some((p) => p.same_user)) parts.push(editing ? "Editing in another tab/session" : "Open in another tab");
+  if (others.length > 0) parts.push(`${others.join(" and ")} ${others.length > 1 ? "are" : "is"} ${editing ? "editing now" : "viewing"}`);
+  return parts.join("; ");
 }
 
 function formatSidebarDate(value: string, dateFormat: string) {

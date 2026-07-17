@@ -308,6 +308,20 @@ Two endpoints support the SPA's offline mode: `GET /api/sync/bootstrap`
 conflict reporting). The client mirrors everything into IndexedDB and queues
 edits while offline — details in [frontend.md](frontend.md#offline-support).
 
+### Live presence (WebSocket)
+
+`GET /ws` (session-authed, outside `/api/` so no request timeout) upgrades to
+a WebSocket backed by an in-memory hub (`backend/web/ws.go`, using
+`github.com/coder/websocket`). Clients `watch` the open note with an
+`editing` flag; the hub aggregates participants per user (a user's other
+tabs/devices show as `same_user`) and broadcasts `presence` updates whenever
+the set changes, and `note_saved` to a note's watchers when someone saves it
+successfully. Watches are ACL-checked through `canAccessNote`, the Origin
+header must match the host (cross-site WebSocket hijacking protection), and
+the server pings every 30s to keep connections alive. The SPA uses this to
+show "…is editing now" / "Open in another tab" chips and to warn early about
+edit collisions before the save-time conflict check fires.
+
 ## Security posture summary
 
 - Argon2id password hashing; sessions and API tokens stored only as SHA-256

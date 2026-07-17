@@ -19,6 +19,7 @@ worker. Everything else lives in a handful of modules:
 | `types.ts` | All API types |
 | `crypto.ts` | OpenPGP.js helpers (key gen, encrypt/decrypt text & bytes) |
 | `offline.ts` | IndexedDB layer (offline mirror, edit queue, key store) |
+| `presence.ts` | WebSocket presence client (watch/unwatch, reconnect, callbacks) |
 | `styles.scss` | All styles (theme maps → CSS custom properties) |
 
 Main components inside `App.tsx` (line numbers approximate):
@@ -164,8 +165,22 @@ The Android app renders the same animation natively — see
 When the app runs inside the companion Android WebView app, the page sees
 `window.cairnfieldAndroid = { versionName, versionCode }` (injected before
 page scripts run). The `isNativeAndroid()` helper in `App.tsx` gates
-Android-only web UI on it — currently it just hides the PWA install prompt,
-which is pointless inside the native app.
+Android-only web UI on it — currently it just hides the sidebar card offering
+the native APK download, which is pointless inside the native app.
+
+## Live presence
+
+`presence.ts` maintains a singleton WebSocket connection to `{base}/ws`
+(lazy connect, exponential-backoff reconnect, watch state resent on
+reconnect). When a note is open, `App` watches it with the editor's current
+dirty state (lifted straight from EditorView's save-status state — content
+change → `editing: true`, save → `false`). The editor shows a presence chip
+next to the save-state chip: "…is editing now" (warning) when another session
+or user is actively editing the same note, "Open in another tab" / "…is
+viewing" otherwise. When a `note_saved` broadcast arrives for the open note,
+the app either quietly reloads it (clean editor + toast "{name} updated this
+note") or warns that the next save may conflict (dirty editor). A short echo
+guard suppresses notifications for this tab's own saves.
 
 ## Known loose ends
 

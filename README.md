@@ -13,6 +13,7 @@ built for markdown notes, folders, attachments, search, and private hosting.
 - Attached files and images
 - PGP-encrypted notes and encrypted attachments
 - Note sharing between users on the same instance
+- Live presence: see who else is viewing or editing a note
 - Templates for daily notes and other repeatable note types
 - Zip import and export backups (with full restore)
 - Offline-capable PWA and Android app

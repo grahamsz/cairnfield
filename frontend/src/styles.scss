@@ -181,9 +181,7 @@ h2 { margin: 0 0 12px; font-size: 16px; }
 }
 .android-install-card strong, .android-install-card small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .android-install-card small { margin-top: 1px; color: var(--muted); font-size: 12px; font-weight: 600; }
-.android-install-actions { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; }
-.android-install-actions .button { width: 100%; justify-content: center; }
-.android-install-actions .link { font-size: 12px; text-align: center; padding: 2px 0; }
+.android-install-card > .button { grid-column: 1 / -1; justify-content: center; }
 .android-install-mark { width: 34px; height: 34px; display: grid; place-items: center; }
 .android-install-mark img { width: 32px; height: 32px; display: block; }
 .content { padding: 18px; min-width: 0; }
@@ -284,6 +282,8 @@ h2 { margin: 0 0 12px; font-size: 16px; }
 .save-state { min-width: 74px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
 .save-state.dirty { color: var(--accent); }
 .save-state.offline { color: var(--danger); }
+.presence-chip { color: var(--muted); font-size: 12px; font-weight: 700; }
+.presence-chip.warning { color: var(--warning); }
 .markdown-editor { min-height: calc(100vh - 230px); font: 14px/1.55 var(--font-mono); }
 .tool-panel, .panel, .auth-card {
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); padding: 16px;
@@ -602,6 +602,7 @@ h2 { margin: 0 0 12px; font-size: 16px; }
 .toast { justify-content: flex-start; text-align: left; box-shadow: var(--shadow); }
 .toast.error { background: var(--danger); color: #fff; }
 .toast.loading { background: var(--accent-strong); color: #fff; }
+.toast.warning { background: var(--warning); color: #17100d; }
 
 @media (max-width: 900px) {
   .topbar { height: auto; min-height: 58px; grid-template-columns: max-content max-content minmax(0, 1fr) max-content; gap: 8px; padding: 8px; }

@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/blevesearch/bleve/v2 v2.6.0
+	github.com/coder/websocket v1.8.15
 	github.com/mattn/go-sqlite3 v1.14.44
 	golang.org/x/crypto v0.52.0
 )
@@ -32,9 +33,7 @@ require (
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/json-iterator/go v0.0.0-20171115153421-f7279a603ede // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
-	github.com/shopspring/decimal v1.3.1 // indirect
 	go.etcd.io/bbolt v1.4.0 // indirect
-	golang.org/x/exp v0.0.0-20221106115401-f9659909a136 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )
