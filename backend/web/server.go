@@ -184,6 +184,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.apiClipBootstrap(w, r)
 	case path == "clip/html":
 		s.apiClipHTML(w, r)
+	case path == "clip/url":
+		s.apiClipURL(w, r)
 	case path == "clip/pdf":
 		s.apiClipPDF(w, r)
 	case path == "clip/image":
@@ -238,7 +240,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func isClipAPIPath(path string) bool {
-	return path == "clip/bootstrap" || path == "clip/html" || path == "clip/pdf" || path == "clip/image"
+	return path == "clip/bootstrap" || path == "clip/html" || path == "clip/url" || path == "clip/pdf" || path == "clip/image"
 }
 
 func (s *Server) validCSRF(r *http.Request) bool {

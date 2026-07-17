@@ -17,6 +17,22 @@ class CairnfieldSharePolicyTest {
     }
 
     @Test
+    fun urlTextWinsOverStreams() {
+        assertTrue(CairnfieldSharePolicy.preferTextShare("https://example.com/page"))
+        assertTrue(CairnfieldSharePolicy.preferTextShare("http://example.com"))
+        assertTrue(CairnfieldSharePolicy.preferTextShare("Check this https://example.com out"))
+        assertTrue(CairnfieldSharePolicy.preferTextShare("HTTP://EXAMPLE.COM"))
+    }
+
+    @Test
+    fun nonUrlTextLeavesStreamsInCharge() {
+        assertFalse(CairnfieldSharePolicy.preferTextShare(null))
+        assertFalse(CairnfieldSharePolicy.preferTextShare(""))
+        assertFalse(CairnfieldSharePolicy.preferTextShare("   "))
+        assertFalse(CairnfieldSharePolicy.preferTextShare("no links here"))
+    }
+
+    @Test
     fun sharedStreamsUseAReservedSameOriginPath() {
         assertEquals(
             "https://notes.example.com/cairnfield-native-share/session/token",

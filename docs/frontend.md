@@ -177,7 +177,9 @@ Android's share sheet (see [android.md](android.md#share-targets-action_send)):
 
 - `?share_text=…&share_subject=…` — a shared text/link opens the dialog with
   a title input, folder picker (moodboard folders marked "(board)"), and text
-  preview; saving creates a note (bare URLs become a markdown link).
+  preview; when the text contains a URL, a "Clip the full page" option
+  (default on) saves via `POST /api/clip/url` — the server fetches and clips
+  the page (SSRF-guarded) instead of creating a bare link note.
 - `?android_share=<sessionId>` — shared files: the dialog loads the manifest
   through the bridge, downloads the bytes from same-origin
   `/cairnfield-native-share/<session>/<token>` URLs, previews them, and saves

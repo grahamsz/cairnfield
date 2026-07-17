@@ -170,11 +170,19 @@ Bearer-token only (API token), CSRF-exempt, multipart. See
 | `POST /api/clip/html` | Fields: `html` (≤50 MB), `preview` (≤8 MB PNG, optional), `metadata` (JSON). |
 | `POST /api/clip/pdf` | Fields: `pdf` (≤80 MB, content sniffed), optional `preview`, `metadata`. |
 | `POST /api/clip/image` | Fields: `image` (≤25 MB, must be `image/*`), `metadata`. |
+| `POST /api/clip/url` | **Session or bearer.** JSON `{url, folder_path?, title?}` — the server fetches the page and clips it like an HTML clip. 400 invalid/blocked URL or non-HTML, 413 over 10 MB, 502 fetch failure. |
 
 `metadata` JSON: `{title, source_url, page_url, selection_text, search_text,
 folder_path, destination_kind, captured_at}`. Each clip creates a note with
 source-attribution markdown, stores the capture as an asset, and sets
 `header_json` (`kind`, `clip`, `asset`, optional `preview_asset`).
+
+`clip/url` fetches server-side with SSRF guards: http/https only, no userinfo
+or fragments, hostnames resolved and every IP checked against
+loopback/private/link-local/multicast ranges — re-validated per redirect and
+enforced at dial time against DNS rebinding. 15s timeout, ≤5 redirects, 10 MB
+cap. Used by the Android share flow when a shared URL should become a full
+page clip instead of a bare link.
 
 ## Import and export
 

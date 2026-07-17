@@ -5,6 +5,12 @@ internal object CairnfieldSharePolicy {
 
     fun acceptsScheme(scheme: String?): Boolean = scheme.equals("content", ignoreCase = true)
 
+    // Browsers attach page-screenshot streams to URL shares; a share whose text
+    // carries an http(s) URL is a page clip, so the text must win over streams.
+    fun preferTextShare(text: String?): Boolean =
+        !text.isNullOrBlank() &&
+            (text.contains("https://", ignoreCase = true) || text.contains("http://", ignoreCase = true))
+
     fun shareUrl(serverOrigin: String, sessionID: String, token: String): String =
         serverOrigin.trimEnd('/') + SHARE_PATH + sessionID + "/" + token
 

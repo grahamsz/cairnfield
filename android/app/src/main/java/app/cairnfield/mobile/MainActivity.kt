@@ -391,10 +391,12 @@ class MainActivity : ComponentActivity() {
             return null
         }
         if (CairnfieldPrefs.serverUrl(this).isBlank()) return null
-        cairnfieldShareStore.capture(sourceIntent)?.let { shareID ->
-            return shareTargetUrl("android_share" to shareID)
-        }
         val text = sourceIntent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+        if (!CairnfieldSharePolicy.preferTextShare(text)) {
+            cairnfieldShareStore.capture(sourceIntent)?.let { shareID ->
+                return shareTargetUrl("android_share" to shareID)
+            }
+        }
         if (text.isBlank()) return null
         val subject = sourceIntent.getStringExtra(Intent.EXTRA_SUBJECT).orEmpty()
         return shareTargetUrl("share_text" to text, "share_subject" to subject)

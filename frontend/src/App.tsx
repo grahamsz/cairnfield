@@ -937,21 +937,33 @@ export default function App() {
     }
   }
 
-  async function saveShare(title: string, targetFolder: string) {
+  async function saveShare(title: string, targetFolder: string, clipPage: boolean) {
     const request = shareRequest;
     if (!request) return;
     if (offlineMode || !navigator.onLine) {
       addToast("Sharing is unavailable offline.", "error");
       return;
     }
-    if (request.kind === "text") await saveTextShare(request, title, targetFolder);
+    if (request.kind === "text") await saveTextShare(request, title, targetFolder, clipPage);
     else await saveFileShare(request, targetFolder);
   }
 
-  async function saveTextShare(request: { text: string; subject: string }, title: string, targetFolder: string) {
+  async function saveTextShare(request: { text: string; subject: string }, title: string, targetFolder: string, clipPage: boolean) {
     try {
       const trimmed = request.text.trim();
       const noteTitle = title.trim() || request.subject.trim() || "Shared note";
+      const url = clipPage ? firstURL(request.text) : "";
+      if (url) {
+        const body: { url: string; folder_path: string; title?: string } = { url, folder_path: targetFolder };
+        const overrideTitle = title.trim() || request.subject.trim();
+        if (overrideTitle) body.title = overrideTitle;
+        const clipped = await api.clipUrl(csrf, body);
+        setShareRequest(null);
+        await loadNotes();
+        await openNote(clipped.note.id);
+        addToast("Page clipped.");
+        return;
+      }
       const content = /^https?:\/\//i.test(trimmed) ? `[${request.subject.trim() || trimmed}](${trimmed})\n\n${request.text}` : request.text;
       const data = await api.createNote(csrf, 0, targetFolder);
       const saved = await api.saveNote(csrf, data.note.id, {
@@ -1216,13 +1228,21 @@ function ImportApprovalDialog({ request, onCancel, onApprove }: { request: Impor
   );
 }
 
-function IncomingShareDialog({ request, folders, onCancel, onSave }: { request: ShareRequest; folders: FolderRecord[]; onCancel: () => void; onSave: (title: string, folderPath: string) => Promise<void> }) {
+function IncomingShareDialog({ request, folders, onCancel, onSave }: { request: ShareRequest; folders: FolderRecord[]; onCancel: () => void; onSave: (title: string, folderPath: string, clipPage: boolean) => Promise<void> }) {
   const defaultTitle = useMemo(() => {
-    if (request.kind === "text") return request.subject.trim() || request.text.trim().slice(0, 60);
+    if (request.kind === "text") {
+      const subject = request.subject.trim();
+      if (subject) return subject;
+      const text = request.text.trim();
+      // A bare URL gets its title from the clipped page, not from the URL text.
+      return /^https?:\/\/\S*$/i.test(text) ? "" : text.slice(0, 60);
+    }
     return request.files[0]?.name || "Shared files";
   }, [request]);
   const [title, setTitle] = useState(defaultTitle);
   const [folderPath, setFolderPath] = useState("/");
+  const sharedURL = useMemo(() => (request.kind === "text" ? firstURL(request.text) : ""), [request]);
+  const [clipPage, setClipPage] = useState(Boolean(sharedURL));
   const [saving, setSaving] = useState(false);
   const folderOptions = useMemo(() => {
     const paths = (folders || []).map((folder) => ({ path: normalizeFolderPath(folder.path), board: folder.display_mode === "moodboard" }));
@@ -1250,6 +1270,9 @@ function IncomingShareDialog({ request, folders, onCancel, onSave }: { request: 
           <option value="/">/</option>
           {folderOptions.map((folder) => <option key={folder.path} value={folder.path}>{folder.board ? `${folder.path} (board)` : folder.path}</option>)}
         </select></label>
+        {request.kind === "text" && sharedURL ? (
+          <label className="check"><input type="checkbox" checked={clipPage} onChange={(event) => setClipPage(event.target.checked)} />Clip the full page from {sharedURL.length > 60 ? `${sharedURL.slice(0, 57)}…` : sharedURL}</label>
+        ) : null}
         {request.kind === "text" ? <pre className="share-text-preview">{request.text.length > 600 ? `${request.text.slice(0, 600)}…` : request.text}</pre> : (
           <div className="import-file-list">{request.files.map((file) => {
             const key = `${file.name}-${file.size}`;
@@ -1259,13 +1282,18 @@ function IncomingShareDialog({ request, folders, onCancel, onSave }: { request: 
         )}
         <div className="modal-actions">
           <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
-          <button type="button" disabled={saving} onClick={() => { setSaving(true); void onSave(title, folderPath).finally(() => setSaving(false)); }}>
-            {request.kind === "text" ? <><ShareNetworkIcon />Save note</> : <><UploadSimpleIcon />Import</>}
+          <button type="button" disabled={saving} onClick={() => { setSaving(true); void onSave(title, folderPath, clipPage).finally(() => setSaving(false)); }}>
+            {request.kind === "text" ? <><ShareNetworkIcon />{clipPage ? "Clip page" : "Save note"}</> : <><UploadSimpleIcon />Import</>}
           </button>
         </div>
       </div>
     </div>
   );
+}
+
+function firstURL(text: string): string {
+  const match = /https?:\/\/\S+/i.exec(text || "");
+  return match ? match[0].replace(/[.,;!?"')\]]+$/, "") : "";
 }
 
 function Setup({ csrf, onDone }: { csrf: string; onDone: () => Promise<void> }) {

@@ -45,8 +45,11 @@ prefilled.
 ### Share targets (ACTION_SEND)
 
 The app registers for `ACTION_SEND` / `ACTION_SEND_MULTIPLE` (`text/plain`,
-`text/html`, `image/*`, `application/pdf`). Text/link shares load
-`{server}/?share_text=…&share_subject=…`; file shares are captured into
+`text/html`, `image/*`, `application/pdf`). When the shared text contains a
+URL it wins over any attached streams (browsers like Brave attach a page
+screenshot as a stream; `CairnfieldSharePolicy.preferTextShare` keeps the
+URL), and text/link shares load `{server}/?share_text=…&share_subject=…`.
+File shares are captured into
 `CairnfieldShareStore` (in-memory sessions, 15-minute TTL, ported from
 rolltop's `NativeShareStore`) and the app loads
 `{server}/?android_share={sessionId}`. The web app fetches the manifest via
