@@ -181,7 +181,9 @@ h2 { margin: 0 0 12px; font-size: 16px; }
 }
 .android-install-card strong, .android-install-card small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .android-install-card small { margin-top: 1px; color: var(--muted); font-size: 12px; font-weight: 600; }
-.android-install-card button { grid-column: 1 / -1; width: 100%; }
+.android-install-actions { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; }
+.android-install-actions .button { width: 100%; justify-content: center; }
+.android-install-actions .link { font-size: 12px; text-align: center; padding: 2px 0; }
 .android-install-mark { width: 34px; height: 34px; display: grid; place-items: center; }
 .android-install-mark img { width: 32px; height: 32px; display: block; }
 .content { padding: 18px; min-width: 0; }

@@ -1024,10 +1024,13 @@ function AndroidInstallCard({ canPrompt, onInstall }: { canPrompt: boolean; onIn
     <section className="android-install-card">
       <div className="android-install-mark"><img src={appURL("/icon.svg")} alt="" /></div>
       <div>
-        <strong>Cairnfield for Android</strong>
-        <small>{canPrompt ? "Install the app on this device." : "Available from your browser menu."}</small>
+        <strong>cairnfield Android app</strong>
+        <small>Native app with offline support. Sideload the APK, then enter this server's URL.</small>
       </div>
-      <button type="button" className="secondary" onClick={onInstall}>Install</button>
+      <div className="android-install-actions">
+        <a className="button secondary" href={appURL("/android/cairnfield.apk")} download="cairnfield.apk">Install app</a>
+        {canPrompt ? <button type="button" className="link" onClick={onInstall}>or add to home screen</button> : null}
+      </div>
     </section>
   );
 }
