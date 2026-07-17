@@ -1,6 +1,7 @@
 package app.cairnfield.mobile
 
 import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,6 +17,21 @@ class CairnfieldServerValidatorTest {
             contentType = "application/json; charset=utf-8",
             body = """{"users_exist":true,"user":null,"csrf":"token","templates":[],"auth_providers":[]}"""
         )
+
+        assertTrue(result.message, result.valid)
+    }
+
+    @Test
+    fun acceptsBootstrapResponseUnderBasePath() {
+        val result = CairnfieldServerValidator.validateWith("https://notes.example.com/cairnfield") { url ->
+            assertEquals("https://notes.example.com/cairnfield/api/bootstrap", url.toString())
+            FakeConnection(
+                url,
+                200,
+                "application/json",
+                """{"users_exist":true,"user":null,"csrf":"token","templates":[],"auth_providers":[]}"""
+            )
+        }
 
         assertTrue(result.message, result.valid)
     }

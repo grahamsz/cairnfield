@@ -20,6 +20,18 @@ class AndroidBackNavigationTest {
     }
 
     @Test
+    fun notePageFallsBackUnderBasePath() {
+        val baseOrigin = "https://notes.example.test/cairnfield"
+
+        assertEquals(
+            "$baseOrigin/",
+            AndroidBackNavigation.noteFallbackUrl(baseOrigin, "$baseOrigin/notes/42/my-note")
+        )
+        assertNull(AndroidBackNavigation.noteFallbackUrl(baseOrigin, "$baseOrigin/folders/projects"))
+        assertNull(AndroidBackNavigation.noteFallbackUrl(baseOrigin, "$baseOrigin/"))
+    }
+
+    @Test
     fun nonNoteAndForeignPagesDoNotOverrideNormalActivityBack() {
         assertNull(AndroidBackNavigation.noteFallbackUrl(origin, "$origin/folders/projects"))
         assertNull(AndroidBackNavigation.noteFallbackUrl(origin, "$origin/"))

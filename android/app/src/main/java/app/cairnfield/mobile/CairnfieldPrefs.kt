@@ -106,7 +106,6 @@ object CairnfieldPrefs {
         }
         if (uri.isOpaque || !uri.scheme.equals("https", ignoreCase = true)) return ""
         if (uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null) return ""
-        if (uri.rawPath.orEmpty() !in setOf("", "/")) return ""
 
         val host = uri.host?.takeIf { it.isNotBlank() } ?: return ""
         val port = uri.port
@@ -117,11 +116,25 @@ object CairnfieldPrefs {
             return ""
         }
 
+        val path = normalizeBasePath(uri.rawPath.orEmpty()) ?: return ""
+
         return try {
-            URI("https", null, normalizedHost, if (port == 443) -1 else port, null, null, null).toASCIIString()
+            URI("https", null, normalizedHost, if (port == 443) -1 else port, path, null, null).toASCIIString()
         } catch (_: Exception) {
             ""
         }
+    }
+
+    private fun normalizeBasePath(path: String): String? {
+        if (path.isEmpty() || path == "/") return ""
+        val segments = path.split('/').filter { it.isNotEmpty() }
+        if (segments.any { it == ".." }) return null
+        return "/" + segments.joinToString("/")
+    }
+
+    internal fun basePath(value: String): String {
+        val uri = parseBaseUrl(value) ?: return ""
+        return uri.rawPath?.trimEnd('/') ?: ""
     }
 
     internal fun internalLocation(baseUrl: String, candidate: String): String? {
@@ -132,9 +145,11 @@ object CairnfieldPrefs {
             return null
         }
         if (!sameOrigin(base, resolved)) return null
-        val path = resolved.rawPath?.takeIf { it.startsWith('/') } ?: "/"
+        val basePath = base.rawPath?.trimEnd('/') ?: ""
+        val resolvedPath = resolved.rawPath?.takeIf { it.startsWith('/') } ?: "/"
+        if (basePath.isNotEmpty() && resolvedPath != basePath && !resolvedPath.startsWith("$basePath/")) return null
         return buildString {
-            append(path)
+            append(resolvedPath)
             resolved.rawQuery?.let { append('?').append(it) }
             resolved.rawFragment?.let { append('#').append(it) }
         }
@@ -143,8 +158,14 @@ object CairnfieldPrefs {
     internal fun resolveInternalUrl(baseUrl: String, path: String): String? {
         if (!path.startsWith('/') || path.startsWith("//")) return null
         val base = parseBaseUrl(baseUrl) ?: return null
+        val basePath = base.rawPath?.trimEnd('/') ?: ""
+        val resolvedPath = when {
+            basePath.isEmpty() -> path
+            path == basePath || path.startsWith("$basePath/") -> path
+            else -> "$basePath$path"
+        }
         val resolved = try {
-            base.resolve(path)
+            base.resolve(resolvedPath)
         } catch (_: Exception) {
             return null
         }
