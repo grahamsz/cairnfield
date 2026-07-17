@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"cairnfield/backend/auth"
 	"cairnfield/backend/blob"
@@ -217,6 +218,15 @@ func runClipMultipart(t *testing.T, srv *Server, rawToken, url, field, filename,
 
 func runClipMultipartWithPreview(t *testing.T, srv *Server, rawToken, url, field, filename, contentType string, meta clipMetadata, data []byte, preview []byte) *httptest.ResponseRecorder {
 	t.Helper()
+	req := buildClipMultipartRequest(t, url, field, filename, contentType, meta, data, preview)
+	req.Header.Set("Authorization", "Bearer "+rawToken)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	return res
+}
+
+func buildClipMultipartRequest(t *testing.T, url, field, filename, contentType string, meta clipMetadata, data []byte, preview []byte) *http.Request {
+	t.Helper()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	rawMeta, err := json.Marshal(meta)
@@ -252,10 +262,50 @@ func runClipMultipartWithPreview(t *testing.T, srv *Server, rawToken, url, field
 	}
 	req := httptest.NewRequest(http.MethodPost, url, &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+rawToken)
+	return req
+}
+
+func TestHTMLClipAcceptsSessionAuth(t *testing.T) {
+	db := testStore(t)
+	defer db.Close()
+	user := testUser(t, db)
+	if err := db.CreateSession(t.Context(), user.ID, store.TokenHash("cliphtml-session"), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Options{Store: db, Blobs: blob.New(t.TempDir())})
+
+	page := []byte(`<!doctype html><html><body><h1>Session Clip</h1></body></html>`)
+	meta := clipMetadata{Title: "Session Clip", SourceURL: "https://example.com/page", PageURL: "https://example.com/page", FolderPath: "/clips", DestinationKind: "folder", CapturedAt: "2024-01-02T03:04:05Z"}
+	req := buildClipMultipartRequest(t, "/api/clip/html", "html", "clip.html", "text/html", meta, page, nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "cliphtml-session"})
 	res := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(res, req)
-	return res
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+	}
+	var out struct {
+		Note store.Note `json:"note"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Note.Title != "Session Clip" || out.Note.OwnerUserID != user.ID {
+		t.Fatalf("note = %+v", out.Note)
+	}
+}
+
+func TestHTMLClipRequiresAuth(t *testing.T) {
+	db := testStore(t)
+	defer db.Close()
+	srv := New(Options{Store: db, Blobs: blob.New(t.TempDir())})
+
+	page := []byte(`<!doctype html><html><body><h1>Nope</h1></body></html>`)
+	req := buildClipMultipartRequest(t, "/api/clip/html", "html", "clip.html", "text/html", clipMetadata{Title: "Nope"}, page, nil)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+	}
 }
 
 func testUser(t *testing.T, db *store.Store) store.User {

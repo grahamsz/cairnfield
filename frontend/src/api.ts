@@ -96,7 +96,7 @@ export const api = {
     if (preview) form.set("preview", preview);
     return parse<{ notes: Note[]; count: number }>(await fetch(appURL("/api/import"), { method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrf }, body: form }));
   },
-  clipUrl: (csrf: string, body: { url: string; folder_path?: string; title?: string }) => postJSON<{ note: Note; version: NoteVersion; asset: Asset; url: string }>("/api/clip/url", csrf, body),
+  clipUrl: (csrf: string, body: { url: string; folder_path?: string; title?: string }) => postJSON<{ note: Note; version: NoteVersion; asset: Asset; url: string; clip_warning?: string }>("/api/clip/url", csrf, body),
   keys: () => getJSON<{ keys: EncryptionKey[] }>("/api/keys"),
   saveKey: (csrf: string, key: Partial<EncryptionKey>) => postJSON<{ key: EncryptionKey }>("/api/keys", csrf, key),
   setDefaultKey: (csrf: string, id: number) => postJSON<{ keys: EncryptionKey[] }>(`/api/keys/${id}/default`, csrf),

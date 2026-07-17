@@ -9,7 +9,8 @@ import android.webkit.JavascriptInterface
  */
 class AndroidWebBridge(
     private val shareStore: CairnfieldShareStore,
-    private val serverOrigin: String
+    private val serverOrigin: String,
+    private val onClipInApp: (url: String, folderPath: String, title: String) -> Unit = { _, _, _ -> }
 ) {
     @JavascriptInterface
     fun getVersionName(): String = BuildConfig.VERSION_NAME
@@ -24,5 +25,15 @@ class AndroidWebBridge(
     @JavascriptInterface
     fun releaseShare(shareId: String) {
         shareStore.release(shareId)
+    }
+
+    /**
+     * Called by the web app to clip [url] from the rendered page: the shell
+     * loads it in the WebView with a clip bar overlay. Invoked on a
+     * JavascriptInterface thread, so the callback must hop to the UI thread.
+     */
+    @JavascriptInterface
+    fun clipInApp(url: String, folderPath: String, title: String) {
+        onClipInApp(url, folderPath, title)
     }
 }

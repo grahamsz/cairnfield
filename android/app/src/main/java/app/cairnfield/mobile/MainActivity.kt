@@ -43,6 +43,11 @@ import androidx.webkit.ServiceWorkerClientCompat
 import androidx.webkit.ServiceWorkerControllerCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.time.Instant
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
@@ -51,6 +56,11 @@ class MainActivity : ComponentActivity() {
     private var loadingAnimationView: CairnfieldLoadingView? = null
     private var loadingRevealGate: LoadingRevealGate? = null
     private var updatePromptPolicy = UpdatePromptPolicy()
+    private var clipModeActive = false
+    private var clipUrl = ""
+    private var clipFolderPath = ""
+    private var clipTitle = ""
+    private var clipBar: View? = null
     private val cairnfieldShareStore by lazy { CairnfieldShareStore(applicationContext) }
     private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
@@ -74,6 +84,13 @@ class MainActivity : ComponentActivity() {
                 savedInstanceState?.getBundle(STATE_WEB_VIEW),
                 savedInstanceState?.getLong(STATE_LOADING_ANIMATION_ELAPSED_MS) ?: 0L
             )
+            if (savedInstanceState?.getBoolean(STATE_CLIP_MODE) == true) {
+                enterClipMode(
+                    savedInstanceState.getString(STATE_CLIP_URL).orEmpty(),
+                    savedInstanceState.getString(STATE_CLIP_FOLDER).orEmpty(),
+                    savedInstanceState.getString(STATE_CLIP_TITLE).orEmpty()
+                )
+            }
         }
     }
 
@@ -108,6 +125,12 @@ class MainActivity : ComponentActivity() {
             STATE_LOADING_ANIMATION_ELAPSED_MS,
             loadingAnimationView?.elapsedMs ?: CairnfieldLoadingView.DURATION_MS
         )
+        outState.putBoolean(STATE_CLIP_MODE, clipModeActive)
+        if (clipModeActive) {
+            outState.putString(STATE_CLIP_URL, clipUrl)
+            outState.putString(STATE_CLIP_FOLDER, clipFolderPath)
+            outState.putString(STATE_CLIP_TITLE, clipTitle)
+        }
         webView?.let { view ->
             val state = Bundle()
             view.saveState(state)
@@ -266,7 +289,12 @@ class MainActivity : ComponentActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             setSupportMultipleWindows(true)
         }
-        view.addJavascriptInterface(AndroidWebBridge(cairnfieldShareStore, serverOrigin), "cairnfieldAndroid")
+        view.addJavascriptInterface(
+            AndroidWebBridge(cairnfieldShareStore, serverOrigin) { url, folderPath, title ->
+                runOnUiThread { enterClipMode(url, folderPath, title) }
+            },
+            "cairnfieldAndroid"
+        )
         view.webViewClient = object : WebViewClient() {
             private var mainFrameCommitted = false
             private var failureHandled = false
@@ -274,6 +302,13 @@ class MainActivity : ComponentActivity() {
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url.toString()
+                // In clip mode, same-site navigations and redirects stay inside so the
+                // user can log in or pass a JS challenge before clipping.
+                if (request.isForMainFrame &&
+                    CairnfieldClipMode.allowsInWebView(clipModeActive, CairnfieldClipMode.isSameSite(clipUrl, url))
+                ) {
+                    return false
+                }
                 val context = WebNavigationContext(
                     isMainFrame = request.isForMainFrame,
                     hasUserGesture = request.hasGesture(),
@@ -294,7 +329,7 @@ class MainActivity : ComponentActivity() {
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 mainNavigationGeneration += 1
-                injectAndroidBridge(view)
+                if (!clipModeActive) injectAndroidBridge(view)
                 if (webView === view && loadingRevealGate === revealGate) {
                     revealGate.markContentPending()
                 }
@@ -349,15 +384,20 @@ class MainActivity : ComponentActivity() {
             }
         }
         cairnfieldWebChromeClient = CairnfieldWebChromeClient(this) { navigation ->
-            handleWebNavigation(
-                navigation.url,
-                WebNavigationContext(
-                    isMainFrame = true,
-                    hasUserGesture = navigation.hasUserGesture,
-                    isRedirect = navigation.isRedirect,
-                    isNewWindow = true
+            // Target-blank links stay in the WebView while clip mode is active.
+            if (CairnfieldClipMode.allowsInWebView(clipModeActive, CairnfieldClipMode.isSameSite(clipUrl, navigation.url))) {
+                webView?.loadUrl(navigation.url)
+            } else {
+                handleWebNavigation(
+                    navigation.url,
+                    WebNavigationContext(
+                        isMainFrame = true,
+                        hasUserGesture = navigation.hasUserGesture,
+                        isRedirect = navigation.isRedirect,
+                        isNewWindow = true
+                    )
                 )
-            )
+            }
         }.also { view.webChromeClient = it }
         view.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             startDownload(url, userAgent, contentDisposition, mimeType)
@@ -457,6 +497,174 @@ class MainActivity : ComponentActivity() {
         CairnfieldPrefs.rememberVisitedUrl(this, webView?.url)
     }
 
+    // --- In-app clip mode ----------------------------------------------------
+
+    private fun enterClipMode(url: String, folderPath: String, title: String) {
+        val view = webView ?: return
+        if (!CairnfieldClipMode.isHttpUrl(url)) return
+        clipModeActive = true
+        clipUrl = url
+        clipFolderPath = folderPath
+        clipTitle = title
+        showClipBar()
+        view.loadUrl(url)
+    }
+
+    private fun exitClipMode(loadAppHome: Boolean) {
+        clipModeActive = false
+        clipUrl = ""
+        clipFolderPath = ""
+        clipTitle = ""
+        dismissClipBar()
+        if (loadAppHome) webView?.loadUrl(CairnfieldPrefs.buildUrl(this, "/"))
+    }
+
+    private fun showClipBar() {
+        val view = webView ?: return
+        val parent = view.parent as? ViewGroup ?: return
+        dismissClipBar()
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(16), dp(8), dp(8), dp(8))
+            elevation = dp(4).toFloat()
+        }
+        val label = TextView(this).apply {
+            text = "Clip this page?"
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val clipButton = Button(this).apply { text = "Clip" }
+        val cancelButton = Button(this).apply { text = "Cancel" }
+        clipButton.setOnClickListener { clipCurrentPage(clipButton) }
+        cancelButton.setOnClickListener { exitClipMode(loadAppHome = true) }
+        bar.addView(label)
+        bar.addView(clipButton)
+        bar.addView(cancelButton)
+        parent.addView(
+            bar,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            )
+        )
+        clipBar = bar
+    }
+
+    private fun dismissClipBar() {
+        (clipBar?.parent as? ViewGroup)?.removeView(clipBar)
+        clipBar = null
+    }
+
+    private fun clipCurrentPage(clipButton: Button) {
+        val view = webView ?: return
+        clipButton.isEnabled = false
+        view.evaluateJavascript(CairnfieldClipMode.SERIALIZER_JS) { result ->
+            if (isFinishing || isDestroyed) return@evaluateJavascript
+            val snapshot = result?.let(CairnfieldClipMode::parsePageSnapshot)
+            if (snapshot == null) {
+                clipButton.isEnabled = true
+                Toast.makeText(this, "Clip failed: could not read this page.", Toast.LENGTH_LONG).show()
+                return@evaluateJavascript
+            }
+            val htmlBytes = snapshot.html.toByteArray(Charsets.UTF_8)
+            if (htmlBytes.size > CairnfieldClipMode.MAX_CLIP_HTML_BYTES) {
+                clipButton.isEnabled = true
+                Toast.makeText(this, "Page too large to clip.", Toast.LENGTH_LONG).show()
+                return@evaluateJavascript
+            }
+            uploadClip(snapshot, htmlBytes, clipButton)
+        }
+    }
+
+    private fun uploadClip(snapshot: ClipPageSnapshot, htmlBytes: ByteArray, clipButton: Button) {
+        val serverUrl = CairnfieldPrefs.serverUrl(this)
+        if (serverUrl.isBlank()) {
+            clipButton.isEnabled = true
+            return
+        }
+        val endpoint = CairnfieldPrefs.buildUrl(this, "/api/clip/html")
+        val cookie = CookieManager.getInstance().getCookie(serverUrl).orEmpty()
+        val metadata = CairnfieldClipMode.metadataJson(
+            title = clipTitle.ifBlank { snapshot.title },
+            pageUrl = snapshot.url.ifBlank { clipUrl },
+            folderPath = clipFolderPath,
+            capturedAt = Instant.now().toString()
+        )
+        Thread({
+            val outcome = runCatching { postClip(endpoint, cookie, metadata, htmlBytes) }
+            runOnUiThread {
+                if (isFinishing || isDestroyed || !clipModeActive) return@runOnUiThread
+                outcome.fold(
+                    onSuccess = { slug ->
+                        if (slug.isNullOrBlank()) {
+                            clipButton.isEnabled = true
+                            Toast.makeText(this, "Clip failed: unexpected server response.", Toast.LENGTH_LONG).show()
+                        } else {
+                            exitClipMode(loadAppHome = false)
+                            webView?.loadUrl(CairnfieldPrefs.buildUrl(this, "/notes/$slug/x"))
+                        }
+                    },
+                    onFailure = { error ->
+                        clipButton.isEnabled = true
+                        Toast.makeText(
+                            this,
+                            "Clip failed: ${error.message ?: "could not reach the server."}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                )
+            }
+        }, "cairnfield-clip-upload").start()
+    }
+
+    private fun postClip(endpoint: String, cookie: String, metadata: String, htmlBytes: ByteArray): String? {
+        val boundary = "cairnfieldClip" + UUID.randomUUID().toString().replace("-", "")
+        val metadataBytes = metadata.toByteArray(Charsets.UTF_8)
+        val htmlHeader = (
+            "--$boundary\r\n" +
+                "Content-Disposition: form-data; name=\"html\"; filename=\"clip.html\"\r\n" +
+                "Content-Type: text/html\r\n\r\n"
+            ).toByteArray(Charsets.UTF_8)
+        val metadataHeader = (
+            "\r\n--$boundary\r\n" +
+                "Content-Disposition: form-data; name=\"metadata\"\r\n\r\n"
+            ).toByteArray(Charsets.UTF_8)
+        val trailer = "\r\n--$boundary--\r\n".toByteArray(Charsets.UTF_8)
+        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 60_000
+            doOutput = true
+            useCaches = false
+            instanceFollowRedirects = false
+            setRequestProperty("User-Agent", "cairnfield-android")
+            setRequestProperty("Accept", "application/json")
+            if (cookie.isNotBlank()) setRequestProperty("Cookie", cookie)
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            setFixedLengthStreamingMode(
+                htmlHeader.size + htmlBytes.size + metadataHeader.size + metadataBytes.size + trailer.size
+            )
+        }
+        try {
+            connection.outputStream.use { output ->
+                output.write(htmlHeader)
+                output.write(htmlBytes)
+                output.write(metadataHeader)
+                output.write(metadataBytes)
+                output.write(trailer)
+            }
+            val status = connection.responseCode
+            val body = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (status !in 200..299) throw IOException("HTTP $status")
+            return CairnfieldClipMode.parseClipSlug(body)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun handleWebNavigation(
         candidate: String,
         context: WebNavigationContext,
@@ -481,8 +689,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun openExternalUrl(candidate: String) {
-        val uri = Uri.parse(candidate)
+    private fun openExternalUrl(candidate: String) {        val uri = Uri.parse(candidate)
         if (uri.scheme?.lowercase() !in setOf("http", "https", "mailto")) return
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
@@ -555,6 +762,10 @@ class MainActivity : ComponentActivity() {
     private fun installBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if (clipModeActive) {
+                    exitClipMode(loadAppHome = true)
+                    return
+                }
                 val view = webView
                 if (view?.canGoBack() == true) {
                     view.goBack()

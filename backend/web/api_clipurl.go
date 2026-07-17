@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"cairnfield/backend/document"
 )
 
 const (
@@ -87,12 +89,18 @@ func (s *Server) apiClipURL(w http.ResponseWriter, r *http.Request) {
 		DestinationKind: "folder",
 		CapturedAt:      capturedAt.Format(time.RFC3339),
 	}
+	searchText := document.SearchableText("clip.html", "text/html; charset=utf-8", data)
+	warning := clipPageWarning(string(data), searchText)
 	note, version, asset, err := s.createHTMLClip(r.Context(), cu.User.ID, meta, "clip.html", data, nil)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"note": note, "version": version, "asset": asset, "url": s.appPath(fmt.Sprintf("/notes/%s", note.Slug))})
+	resp := map[string]any{"note": note, "version": version, "asset": asset, "url": s.appPath(fmt.Sprintf("/notes/%s", note.Slug))}
+	if warning != "" {
+		resp["clip_warning"] = warning
+	}
+	writeJSON(w, resp)
 }
 
 // fetchClipURLPage downloads a web page with SSRF guards: only plain http(s)
@@ -254,4 +262,93 @@ func extractHTMLTitle(data []byte) string {
 		return ""
 	}
 	return strings.Join(strings.Fields(html.UnescapeString(string(match[1]))), " ")
+}
+
+const (
+	// clipWarningThinTextChars is the extracted visible-text length below
+	// which a clip is uselessly thin on its own.
+	clipWarningThinTextChars = 200
+	// clipWarningMarkerTextChars is the extracted visible-text length below
+	// which a wall marker (JS-disabled or login wall) decides the warning.
+	clipWarningMarkerTextChars = 400
+	// clipWarningDominantTextChars bounds the "dominant wall" case: the wall
+	// message is visible in the extracted text with little else around it,
+	// even when boilerplate pushes the text past clipWarningMarkerTextChars.
+	clipWarningDominantTextChars = 1000
+	// clipWarningHTMLScanBytes bounds the HTML slice scanned for markers.
+	clipWarningHTMLScanBytes = 1 << 20
+)
+
+// clipWarningJSRequiredMarkers mark pages whose real content only appears
+// after JavaScript runs (JS-disabled walls, bot checks, Cloudflare
+// interstitials). Matched case-insensitively against the lowered HTML.
+var clipWarningJSRequiredMarkers = []string{
+	"javascript is disabled",
+	"please enable javascript",
+	"you need to enable javascript",
+	"enable javascript",
+	"requires javascript",
+	"verify that you're not a robot",
+	"verify you are not a robot",
+	"are you a robot",
+	"checking your browser",
+	"just a moment...",
+}
+
+// clipWarningLoginRequiredMarkers mark pages gated behind a login or
+// subscription. Matched case-insensitively against the lowered HTML.
+var clipWarningLoginRequiredMarkers = []string{
+	"sign in to continue",
+	"log in to continue",
+	"subscribe to continue",
+	"create an account to continue",
+	"this content is for subscribers",
+	"already a subscriber? sign in",
+	"join to read",
+}
+
+// clipPageWarning reports whether a clipped page almost certainly failed to
+// capture useful content: "javascript_required" for JS walls, "login_required"
+// for login/subscribe walls, "thin_content" for near-empty pages, or "" when
+// the page looks fine. searchText is the visible text extracted from pageHTML.
+func clipPageWarning(pageHTML, searchText string) string {
+	text := strings.TrimSpace(searchText)
+	scan := pageHTML
+	if len(scan) > clipWarningHTMLScanBytes {
+		scan = scan[:clipWarningHTMLScanBytes]
+	}
+	lowered := strings.ToLower(scan)
+	loweredText := strings.ToLower(text)
+
+	if marker := firstClipWarningMarker(lowered, clipWarningJSRequiredMarkers); marker != "" {
+		// Fire when the page is thin, or when the wall message dominates the
+		// visible text (a wall block plus boilerplate) — not when a long page
+		// merely mentions javascript in passing.
+		if len(text) < clipWarningMarkerTextChars ||
+			(strings.Contains(loweredText, marker) && len(text) < clipWarningDominantTextChars) {
+			return "javascript_required"
+		}
+	}
+	// A <noscript>-only wall leaves no extractable text behind at all.
+	if len(text) == 0 && strings.Contains(lowered, "<noscript") {
+		return "javascript_required"
+	}
+	if len(text) < clipWarningMarkerTextChars {
+		if firstClipWarningMarker(lowered, clipWarningLoginRequiredMarkers) != "" {
+			return "login_required"
+		}
+	}
+	if len(text) < clipWarningThinTextChars {
+		return "thin_content"
+	}
+	return ""
+}
+
+func firstClipWarningMarker(lowered string, markers []string) string {
+	for _, marker := range markers {
+		if strings.Contains(lowered, marker) {
+			return marker
+		}
+	}
+	return ""
 }

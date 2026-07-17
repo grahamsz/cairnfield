@@ -1112,9 +1112,13 @@ func (s *Server) apiClipBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiClipHTML(w http.ResponseWriter, r *http.Request) {
-	cu, ok := s.requireBearerAuth(w, r)
-	if !ok {
-		return
+	cu := current(r)
+	if cu.User.ID == 0 {
+		var ok bool
+		cu, ok = s.requireBearerAuth(w, r)
+		if !ok {
+			return
+		}
 	}
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)

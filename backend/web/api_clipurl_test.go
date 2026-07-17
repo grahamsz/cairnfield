@@ -299,3 +299,212 @@ func TestClipURLFollowsRedirectToFinalPage(t *testing.T) {
 		t.Fatalf("header_json = %s", out.Version.HeaderJSON)
 	}
 }
+
+const clipURLJSWallPage = `<!doctype html><html><head><title>Robot Check</title></head><body><div><p>JavaScript is disabled</p><p>In order to continue, we need to verify that you're not a robot. This requires JavaScript. Enable JavaScript and reload the page.</p></div></body></html>`
+
+const clipURLPaywallPage = `<!doctype html><html><head><title>Daily Chronicle</title></head><body><h1>City Council Approves Budget</h1><p>Subscribe to continue reading.</p></body></html>`
+
+func TestClipURLWarnsJavaScriptRequired(t *testing.T) {
+	page := serveClipURLPage(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(clipURLJSWallPage))
+	})
+	allowClipURLHosts(t, strings.TrimPrefix(page.URL, "http://"))
+
+	db := testStore(t)
+	defer db.Close()
+	user := testUser(t, db)
+	raw := createTestAPIToken(t, db, user.ID)
+	srv := New(Options{Store: db, Blobs: blob.New(t.TempDir())})
+
+	res := postClipURL(t, srv, raw, fmt.Sprintf(`{"url":%q}`, page.URL))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+	}
+	var out struct {
+		Note        store.Note `json:"note"`
+		ClipWarning string     `json:"clip_warning"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Note.ID == 0 {
+		t.Fatal("note was not created despite the warning")
+	}
+	if out.ClipWarning != "javascript_required" {
+		t.Fatalf("clip_warning = %q, want javascript_required", out.ClipWarning)
+	}
+}
+
+func TestClipURLWarnsLoginRequired(t *testing.T) {
+	page := serveClipURLPage(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(clipURLPaywallPage))
+	})
+	allowClipURLHosts(t, strings.TrimPrefix(page.URL, "http://"))
+
+	db := testStore(t)
+	defer db.Close()
+	user := testUser(t, db)
+	raw := createTestAPIToken(t, db, user.ID)
+	srv := New(Options{Store: db, Blobs: blob.New(t.TempDir())})
+
+	res := postClipURL(t, srv, raw, fmt.Sprintf(`{"url":%q}`, page.URL))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+	}
+	var out struct {
+		Note        store.Note `json:"note"`
+		ClipWarning string     `json:"clip_warning"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Note.ID == 0 {
+		t.Fatal("note was not created despite the warning")
+	}
+	if out.ClipWarning != "login_required" {
+		t.Fatalf("clip_warning = %q, want login_required", out.ClipWarning)
+	}
+}
+
+func TestClipURLNoWarningForRichPage(t *testing.T) {
+	rich := `<!doctype html><html><head><title>Long Essay</title></head><body><h1>Long Essay</h1><p>` +
+		strings.Repeat("A substantial paragraph of real article content that renders fine without scripting. ", 20) +
+		`</p></body></html>`
+	page := serveClipURLPage(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(rich))
+	})
+	allowClipURLHosts(t, strings.TrimPrefix(page.URL, "http://"))
+
+	db := testStore(t)
+	defer db.Close()
+	user := testUser(t, db)
+	raw := createTestAPIToken(t, db, user.ID)
+	srv := New(Options{Store: db, Blobs: blob.New(t.TempDir())})
+
+	res := postClipURL(t, srv, raw, fmt.Sprintf(`{"url":%q}`, page.URL))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", res.Code, res.Body.String())
+	}
+	var out struct {
+		Note        store.Note `json:"note"`
+		ClipWarning string     `json:"clip_warning"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Note.ID == 0 {
+		t.Fatal("note was not created")
+	}
+	if out.ClipWarning != "" {
+		t.Fatalf("clip_warning = %q, want empty", out.ClipWarning)
+	}
+}
+
+func TestClipPageWarning(t *testing.T) {
+	richText := strings.Repeat("substantial article content ", 60) // 1680 chars
+	mediumText := strings.Repeat("substantial article content ", 21) // 588 chars
+	cases := []struct {
+		name string
+		html string
+		text string
+		want string
+	}{
+		{"empty page", "", "", "thin_content"},
+		{
+			"js wall thin text",
+			`<html><body><p>JavaScript is disabled</p><p>Verify that you're not a robot.</p></body></html>`,
+			"JavaScript is disabled. Verify that you're not a robot.",
+			"javascript_required",
+		},
+		{
+			"js wall uppercase",
+			`<html><body><p>JAVASCRIPT IS DISABLED</p></body></html>`,
+			"JAVASCRIPT IS DISABLED",
+			"javascript_required",
+		},
+		{
+			"cloudflare interstitial",
+			`<html><head><title>Just a moment...</title></head><body>Just a moment...</body></html>`,
+			"Just a moment...",
+			"javascript_required",
+		},
+		{
+			"browser check",
+			`<html><body><p>Checking your browser before accessing the site.</p></body></html>`,
+			"Checking your browser before accessing the site.",
+			"javascript_required",
+		},
+		{
+			"noscript wall empty text",
+			`<html><body><noscript><p>Please enable JavaScript to view this page.</p></noscript></body></html>`,
+			"",
+			"javascript_required",
+		},
+		{
+			"dominant js wall with boilerplate",
+			`<html><body><p>JavaScript is disabled. Verify that you're not a robot.</p><nav>` + mediumText + `</nav></body></html>`,
+			"JavaScript is disabled. Verify that you're not a robot. " + mediumText,
+			"javascript_required",
+		},
+		{
+			"rich page mentions javascript",
+			`<html><body><p>` + richText + ` Enable JavaScript for the best experience.</p></body></html>`,
+			richText,
+			"",
+		},
+		{
+			"js marker in html only medium text",
+			`<html><body><p>` + mediumText + `</p><script>var x = "enable javascript";</script></body></html>`,
+			mediumText,
+			"",
+		},
+		{
+			"sign in wall thin text",
+			`<html><body><p>Sign in to continue reading this article.</p></body></html>`,
+			"Sign in to continue reading this article.",
+			"login_required",
+		},
+		{
+			"subscribe wall thin text",
+			`<html><body><p>Subscribe to continue reading.</p></body></html>`,
+			"Subscribe to continue reading.",
+			"login_required",
+		},
+		{
+			"subscriber content thin text",
+			`<html><body><p>This content is for subscribers. Already a subscriber? Sign in.</p></body></html>`,
+			"This content is for subscribers. Already a subscriber? Sign in.",
+			"login_required",
+		},
+		{
+			"login marker with rich text",
+			`<html><body><p>` + richText + `</p><footer>Sign in to continue to your account.</footer></body></html>`,
+			richText,
+			"",
+		},
+		{"thin no markers", `<html><body><p>` + strings.Repeat("a", 150) + `</p></body></html>`, strings.Repeat("a", 150), "thin_content"},
+		{"text at thin boundary", `<html><body><p>` + strings.Repeat("a", 200) + `</p></body></html>`, strings.Repeat("a", 200), ""},
+		{
+			"js marker at text boundary",
+			`<html><body><p>` + strings.Repeat("a", 400) + `</p><script>// enable javascript</script></body></html>`,
+			strings.Repeat("a", 400),
+			"",
+		},
+		{
+			"js warning wins over login",
+			`<html><body><p>JavaScript is disabled. Subscribe to continue.</p></body></html>`,
+			"JavaScript is disabled. Subscribe to continue.",
+			"javascript_required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clipPageWarning(tc.html, tc.text); got != tc.want {
+				t.Fatalf("clipPageWarning() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

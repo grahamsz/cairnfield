@@ -86,6 +86,7 @@ type FolderSortMode = "newest" | "oldest" | "alphabetical" | "custom";
 type FolderNode = { path: string; name: string; children: FolderNode[]; notes: NoteSummary[]; noteCount: number };
 type ImportRequest = { files: File[]; folderPath: string };
 type ShareRequest = { kind: "text"; text: string; subject: string } | { kind: "files"; files: File[] };
+type PartialClip = { noteID: number; url: string; folder: string; title: string; warning: string };
 type SecurityUnlock = { keyID: number; label: string; fingerprint: string; publicKeyArmored: string; privateKeyArmored: string; passphrase: string; unlockedUntil: number };
 type EditorSnapshot = { activeNote: Note; version: NoteVersion; title: string; folder: string; content: string; headerJSON: string; encrypted: boolean; plainUnlocked: boolean; securityUnlock: SecurityUnlock | null; defaultKey: EncryptionKey | null; signature: string };
 type DateFormatOption = { value: string; label: string; sample: string };
@@ -142,6 +143,7 @@ export default function App() {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set(["/"]));
   const [importRequest, setImportRequest] = useState<ImportRequest | null>(null);
   const [shareRequest, setShareRequest] = useState<ShareRequest | null>(null);
+  const [partialClip, setPartialClip] = useState<PartialClip | null>(null);
   const [securityUnlock, setSecurityUnlock] = useState<SecurityUnlock | null>(null);
   const [securityUnlockOpen, setSecurityUnlockOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -960,6 +962,10 @@ export default function App() {
         const clipped = await api.clipUrl(csrf, body);
         setShareRequest(null);
         await loadNotes();
+        if (clipped.clip_warning) {
+          setPartialClip({ noteID: clipped.note.id, url, folder: targetFolder, title: clipped.note.title || noteTitle, warning: clipped.clip_warning });
+          return;
+        }
         await openNote(clipped.note.id);
         addToast("Page clipped.");
         return;
@@ -981,6 +987,31 @@ export default function App() {
       setShareRequest(null);
       await openNote(saved.note.id);
       addToast("Shared note created.");
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  }
+
+  async function keepPartialClip() {
+    const clip = partialClip;
+    if (!clip) return;
+    setPartialClip(null);
+    await openNote(clip.noteID);
+    addToast("Page clipped.");
+  }
+
+  async function reclipPartialInApp() {
+    const clip = partialClip;
+    if (!clip) return;
+    try {
+      (window as any).cairnfieldAndroid.clipInApp(clip.url, clip.folder, clip.title);
+      await api.trashNote(csrf, clip.noteID);
+      const removeTrashed = (items: NoteSummary[]) => (items || []).filter((item) => item.id !== clip.noteID);
+      setNotes(removeTrashed);
+      setFolderNotes(folder === "__trash" ? (items) => items : removeTrashed);
+      setSearchResults(removeTrashed);
+      setPartialClip(null);
+      addToast("Opening the page in the app — clip it from there.");
     } catch (err) {
       addToast(messageFromError(err), "error");
     }
@@ -1124,6 +1155,7 @@ export default function App() {
       </div>
       {importRequest ? <ImportApprovalDialog request={importRequest} onCancel={() => setImportRequest(null)} onApprove={() => { const req = importRequest; setImportRequest(null); void importFiles(req.files, req.folderPath); }} /> : null}
       {shareRequest ? <IncomingShareDialog request={shareRequest} folders={folders} onCancel={() => setShareRequest(null)} onSave={saveShare} /> : null}
+      {partialClip ? <PartialClipDialog clip={partialClip} native={isNativeAndroid()} onKeep={() => void keepPartialClip()} onClipInApp={() => void reclipPartialInApp()} /> : null}
       {securityUnlockOpen ? <PGPUnlockDialog keys={keys} onClose={() => setSecurityUnlockOpen(false)} onUnlocked={(state) => { setSecurityUnlock(state); setSecurityUnlockOpen(false); addToast("PGP key unlocked."); }} addToast={addToast} /> : null}
       <ToastStack toasts={toasts} onDismiss={(id) => setToasts((items) => items.filter((t) => t.id !== id))} />
     </>
@@ -1285,6 +1317,25 @@ function IncomingShareDialog({ request, folders, onCancel, onSave }: { request: 
           <button type="button" disabled={saving} onClick={() => { setSaving(true); void onSave(title, folderPath, clipPage).finally(() => setSaving(false)); }}>
             {request.kind === "text" ? <><ShareNetworkIcon />{clipPage ? "Clip page" : "Save note"}</> : <><UploadSimpleIcon />Import</>}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PartialClipDialog({ clip, native, onKeep, onClipInApp }: { clip: PartialClip; native: boolean; onKeep: () => void; onClipInApp: () => void }) {
+  const reason = clip.warning === "login_required" ? "it appears to require a login or subscription"
+    : clip.warning === "thin_content" ? "very little text could be extracted"
+    : "it appears to need JavaScript or a login";
+  return (
+    <div className="modal-backdrop" onClick={onKeep}>
+      <div className="security-dialog" role="dialog" aria-label="Clip may be incomplete" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head"><h2>Clip may be incomplete</h2><button type="button" className="ghost" onClick={onKeep}>Close</button></div>
+        <p className="muted">This page may not have clipped properly — {reason}. The saved clip may be incomplete.</p>
+        {!native ? <p className="muted">Clipping pages that need JavaScript or a login is available in the Android app or the browser extension.</p> : null}
+        <div className="modal-actions">
+          <button type="button" className="secondary" onClick={onKeep}>Keep partial clip</button>
+          {native ? <button type="button" onClick={onClipInApp}>Open in app to clip</button> : null}
         </div>
       </div>
     </div>
