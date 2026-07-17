@@ -9,6 +9,7 @@ import {
   ClockCounterClockwiseIcon,
   CodeIcon,
   DownloadSimpleIcon,
+  DeviceMobileIcon,
   DotsSixVerticalIcon,
   EyeIcon,
   FilePlusIcon,
@@ -2756,6 +2757,15 @@ function SettingsView({ csrf, user, updateUser, templates, initialTemplateID, se
               </div>
             );
           })}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="template-head">
+          <div><h1>Android app</h1><p className="muted">Install the native Android companion from this server. It self-updates when the server image changes.</p></div>
+        </div>
+        <div className="extension-install-row">
+          <div><strong>cairnfield Android APK</strong><small>Download and sideload the APK, then enter this server's URL.</small></div>
+          <a className="button secondary" href={appURL("/android/cairnfield.apk")}><DeviceMobileIcon />Download APK</a>
         </div>
       </section>
       <section className="panel template-editor-panel">

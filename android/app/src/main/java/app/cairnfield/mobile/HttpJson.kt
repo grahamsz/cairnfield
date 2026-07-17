@@ -29,7 +29,7 @@ object HttpJson {
                 useCaches = false
                 setRequestProperty("Accept", "application/json")
                 setRequestProperty("Cache-Control", "no-cache")
-                // The GitHub API rejects requests without a User-Agent.
+                // The server may reject requests without a User-Agent.
                 setRequestProperty("User-Agent", USER_AGENT)
             }
         } catch (_: Exception) {

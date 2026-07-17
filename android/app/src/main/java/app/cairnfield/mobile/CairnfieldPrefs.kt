@@ -5,13 +5,14 @@ import java.net.IDN
 import java.net.URI
 
 object CairnfieldPrefs {
-    data class ReadyUpdate(val versionName: String)
+    data class ReadyUpdate(val versionName: String, val versionCode: Int)
 
     private const val NAME = "cairnfield"
     private const val KEY_SERVER_URL = "server_url"
     private const val KEY_LAST_LOCATION = "last_location"
     private const val KEY_LAST_UPDATE_CHECK = "last_update_check"
     private const val KEY_READY_UPDATE_NAME = "ready_update_name"
+    private const val KEY_READY_UPDATE_CODE = "ready_update_code"
 
     fun serverUrl(context: Context): String {
         val stored = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -19,6 +20,8 @@ object CairnfieldPrefs {
             .orEmpty()
         return normalizeBaseUrl(stored)
     }
+
+    fun serverBaseUrl(context: Context): String = serverUrl(context)
 
     fun setServerUrl(context: Context, value: String): Boolean {
         val normalized = normalizeBaseUrl(value)
@@ -32,6 +35,7 @@ object CairnfieldPrefs {
                 remove(KEY_LAST_LOCATION)
                 remove(KEY_LAST_UPDATE_CHECK)
                 remove(KEY_READY_UPDATE_NAME)
+                remove(KEY_READY_UPDATE_CODE)
             }
         }.apply()
         return true
@@ -64,21 +68,23 @@ object CairnfieldPrefs {
     }
 
     fun readyUpdate(context: Context): ReadyUpdate? {
-        val name = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
-            .getString(KEY_READY_UPDATE_NAME, "")
-            .orEmpty()
-        return if (name.isNotBlank()) ReadyUpdate(name) else null
+        val preferences = context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+        val name = preferences.getString(KEY_READY_UPDATE_NAME, "").orEmpty()
+        val code = preferences.getInt(KEY_READY_UPDATE_CODE, 0)
+        return if (name.isNotBlank()) ReadyUpdate(name, code) else null
     }
 
-    fun setReadyUpdate(context: Context, versionName: String) {
+    fun setReadyUpdate(context: Context, versionName: String, versionCode: Int) {
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
             .putString(KEY_READY_UPDATE_NAME, versionName)
+            .putInt(KEY_READY_UPDATE_CODE, versionCode)
             .apply()
     }
 
     fun clearReadyUpdate(context: Context) {
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE).edit()
             .remove(KEY_READY_UPDATE_NAME)
+            .remove(KEY_READY_UPDATE_CODE)
             .apply()
     }
 

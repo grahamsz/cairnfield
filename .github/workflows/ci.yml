@@ -59,6 +59,74 @@ jobs:
       - name: Install Frontend Dependencies
         run: npm ci
 
+      - name: Set Up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set Up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set Up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run Android Unit Tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest
+
+      - name: Build Debug APK
+        working-directory: android
+        run: ./gradlew :app:assembleDebug
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cairnfield-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Set Android Release Version
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "CAIRNFIELD_ANDROID_VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "CAIRNFIELD_ANDROID_VERSION_NAME=0.1.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          fi
+          echo "CAIRNFIELD_ANDROID_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Decode Release Keystore
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/cairnfield-release.jks"
+          echo "CAIRNFIELD_KEYSTORE_FILE=$RUNNER_TEMP/cairnfield-release.jks" >> "$GITHUB_ENV"
+
+      - name: Build Signed Release APK And Embed
+        if: github.event_name != 'pull_request'
+        working-directory: android
+        env:
+          CAIRNFIELD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CAIRNFIELD_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CAIRNFIELD_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:assembleRelease
+          mkdir -p ../frontend/public/android
+          cp app/build/outputs/apk/release/app-release.apk ../frontend/public/android/cairnfield.apk
+          apk_sha256="$(sha256sum ../frontend/public/android/cairnfield.apk | awk '{print $1}')"
+          cat > ../frontend/public/android/latest.json <<EOF
+          {
+            "versionCode": ${CAIRNFIELD_ANDROID_VERSION_CODE},
+            "versionName": "${CAIRNFIELD_ANDROID_VERSION_NAME}",
+            "apkUrl": "/android/cairnfield.apk",
+            "sha256": "${apk_sha256}"
+          }
+          EOF
+
       - name: Build Frontend
         run: npm run build
 
@@ -75,6 +143,37 @@ jobs:
             --label "org.opencontainers.image.version=${CAIRNFIELD_VERSION}" \
             -t "${CAIRNFIELD_IMAGE}:${CAIRNFIELD_VERSION}" \
             .
+
+      - name: Verify Embedded Android APK
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          container_id="$(docker create "${CAIRNFIELD_IMAGE}:${CAIRNFIELD_VERSION}")"
+          docker cp "$container_id:/app/frontend/dist/android/latest.json" "$RUNNER_TEMP/latest.json"
+          docker cp "$container_id:/app/frontend/dist/android/cairnfield.apk" "$RUNNER_TEMP/cairnfield.apk"
+          docker rm "$container_id"
+
+          json_sha256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$RUNNER_TEMP/latest.json")"
+          apk_sha256="$(sha256sum "$RUNNER_TEMP/cairnfield.apk" | awk '{print $1}')"
+          if [ "$json_sha256" != "$apk_sha256" ]; then
+            echo "SHA256 mismatch: JSON says $json_sha256, APK is $apk_sha256"
+            exit 1
+          fi
+
+          json_version_code="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["versionCode"])' "$RUNNER_TEMP/latest.json")"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          aapt_path="$(find "$sdk_root/build-tools" -maxdepth 2 -name aapt -type f | sort -V | tail -n1)"
+          if [ -z "$aapt_path" ]; then
+            echo "aapt not found in $sdk_root/build-tools"
+            exit 1
+          fi
+          apk_version_code="$("$aapt_path" dump badging "$RUNNER_TEMP/cairnfield.apk" | awk -F"versionCode='" '/versionCode=/{print $2}' | cut -d"'" -f1)"
+          if [ "$json_version_code" != "$apk_version_code" ]; then
+            echo "versionCode mismatch: JSON says $json_version_code, APK is $apk_version_code"
+            exit 1
+          fi
+
+          echo "Embedded APK verified: versionCode=$apk_version_code, sha256=$apk_sha256"
 
       - name: Log In To GHCR
         if: github.event_name != 'pull_request'

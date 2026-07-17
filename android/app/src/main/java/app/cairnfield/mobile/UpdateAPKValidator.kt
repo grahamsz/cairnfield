@@ -9,6 +9,24 @@ import java.io.File
 import java.security.MessageDigest
 
 object UpdateAPKValidator {
+    fun validate(context: Context, apk: File, expectedVersionCode: Int): Boolean {
+        if (!apk.isFile || expectedVersionCode <= 0) return false
+        val archive = packageInfoForArchive(context.packageManager, apk) ?: return false
+        if (archive.packageName != context.packageName) return false
+        if (versionCode(archive) != expectedVersionCode) return false
+
+        val installed = installedPackageInfo(context.packageManager, context.packageName) ?: return false
+        val installedSigners = signerSet(installed) ?: return false
+        val candidateSigners = signerSet(archive) ?: return false
+        return signingLineageCompatible(
+            installedSigners.current,
+            candidateSigners.current,
+            candidateSigners.history,
+            installedSigners.multiple,
+            candidateSigners.multiple
+        )
+    }
+
     fun validate(context: Context, apk: File, expectedVersionName: String): Boolean {
         if (!apk.isFile || expectedVersionName.isBlank()) return false
         val archive = packageInfoForArchive(context.packageManager, apk) ?: return false
@@ -42,6 +60,14 @@ object UpdateAPKValidator {
         }
         return candidateHistory.containsAll(installedCurrent)
     }
+
+    @Suppress("DEPRECATION")
+    internal fun versionCode(info: PackageInfo): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode.toInt()
+        } else {
+            info.versionCode
+        }
 
     @Suppress("DEPRECATION")
     private fun packageInfoForArchive(packageManager: PackageManager, apk: File): PackageInfo? {

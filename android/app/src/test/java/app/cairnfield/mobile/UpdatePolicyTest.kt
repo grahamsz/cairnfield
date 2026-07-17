@@ -9,28 +9,17 @@ import org.junit.Test
 
 class UpdatePolicyTest {
     @Test
-    fun onlyNewerVersionNamesAreOffered() {
-        assertTrue(UpdatePolicy.shouldOffer("v0.2.0", "0.1.9"))
-        assertTrue(UpdatePolicy.shouldOffer("0.10.0", "v0.9.9"))
-        assertFalse(UpdatePolicy.shouldOffer("0.2.0", "v0.2.0"))
-        assertFalse(UpdatePolicy.shouldOffer("v0.1.9", "0.2.0"))
+    fun onlyNewerVersionCodesAreOffered() {
+        assertTrue(UpdatePolicy.shouldOffer(2, 1))
+        assertFalse(UpdatePolicy.shouldOffer(1, 1))
+        assertFalse(UpdatePolicy.shouldOffer(1, 2))
     }
 
     @Test
-    fun versionComparisonHandlesDottedComponents() {
-        assertTrue(UpdatePolicy.compareVersions("1.0", "0.9.9") > 0)
-        assertTrue(UpdatePolicy.compareVersions("0.2.1", "0.2") > 0)
-        assertTrue(UpdatePolicy.compareVersions("0.2.0", "0.2.0") == 0)
-        assertTrue(UpdatePolicy.compareVersions("0.2.0-beta", "0.1.9") > 0)
-        assertTrue(UpdatePolicy.compareVersions("0.10.0", "0.9.9") > 0)
-    }
-
-    @Test
-    fun aValidatedCachedOfferIsNotDownloadedAgain() {
-        assertFalse(UpdatePolicy.needsAPKDownload("0.2.0", "0.2.0"))
-        assertTrue(UpdatePolicy.needsAPKDownload("0.2.0", null))
-        assertTrue(UpdatePolicy.needsAPKDownload("0.2.1", "0.2.0"))
-        assertTrue(UpdatePolicy.needsAPKDownload("v0.2.0", "0.1.0"))
+    fun cachedOfferWithSameVersionCodeDoesNotNeedDownload() {
+        assertFalse(UpdatePolicy.needsAPKDownload(2, 2))
+        assertTrue(UpdatePolicy.needsAPKDownload(2, null))
+        assertTrue(UpdatePolicy.needsAPKDownload(3, 2))
     }
 
     @Test
@@ -41,80 +30,157 @@ class UpdatePolicyTest {
     }
 
     @Test
-    fun releaseWithPreferredAssetProducesAnInstallableOffer() {
-        val offer = UpdatePolicy.parseReleaseOffer(
-            installedVersionName = "0.1.0",
-            release = releaseJson(
-                tag = "v0.2.0",
-                assets = """
-                    {"name":"cairnfield-server-linux-amd64","browser_download_url":"https://github.com/grahamsz/cairnfield/releases/download/v0.2.0/cairnfield-server-linux-amd64"},
-                    {"name":"cairnfield-android.apk","browser_download_url":"https://github.com/grahamsz/cairnfield/releases/download/v0.2.0/cairnfield-android.apk","digest":"sha256:${"a".repeat(64)}"}
-                """
+    fun serverMetadataProducesInstallableOfferWithRelativeApkUrl() {
+        val offer = UpdatePolicy.parseServerOffer(
+            installedVersionCode = 1,
+            serverBaseURL = "https://notes.example.com",
+            metadata = serverJson(
+                versionCode = 2,
+                versionName = "0.2.0",
+                apkUrl = "android/cairnfield.apk",
+                sha256 = "a".repeat(64)
             )
         )
 
+        assertEquals(2, offer?.versionCode)
         assertEquals("0.2.0", offer?.versionName)
-        assertEquals("https://github.com/grahamsz/cairnfield/releases/download/v0.2.0/cairnfield-android.apk", offer?.apkURL)
+        assertEquals("https://notes.example.com/android/cairnfield.apk", offer?.apkURL)
         assertEquals("a".repeat(64), offer?.sha256)
     }
 
     @Test
-    fun anyApkAssetIsAcceptedWhenThePreferredNameIsMissing() {
-        val offer = UpdatePolicy.parseReleaseOffer(
-            installedVersionName = "0.1.0",
-            release = releaseJson(
-                tag = "0.2.0",
-                assets = """{"name":"app-release.apk","browser_download_url":"https://github.com/grahamsz/cairnfield/releases/download/v0.2.0/app-release.apk"}"""
+    fun absoluteApkUrlIsUsedAsIs() {
+        val offer = UpdatePolicy.parseServerOffer(
+            installedVersionCode = 1,
+            serverBaseURL = "https://notes.example.com",
+            metadata = serverJson(
+                versionCode = 2,
+                versionName = "0.2.0",
+                apkUrl = "https://cdn.example.com/android/cairnfield.apk"
             )
         )
 
-        assertEquals("0.2.0", offer?.versionName)
-        assertTrue(offer?.sha256?.isEmpty() == true)
+        assertEquals("https://cdn.example.com/android/cairnfield.apk", offer?.apkURL)
     }
 
     @Test
-    fun currentOrOlderReleasesAndApkLessReleasesProduceNoOffer() {
-        assertNull(
-            UpdatePolicy.parseReleaseOffer(
-                "0.2.0",
-                releaseJson(
-                    tag = "v0.2.0",
-                    assets = """{"name":"cairnfield-android.apk","browser_download_url":"https://github.com/grahamsz/cairnfield/releases/download/v0.2.0/cairnfield-android.apk"}"""
-                )
+    fun leadingSlashInRelativeApkUrlIsResolved() {
+        val offer = UpdatePolicy.parseServerOffer(
+            installedVersionCode = 1,
+            serverBaseURL = "https://notes.example.com",
+            metadata = serverJson(
+                versionCode = 2,
+                versionName = "0.2.0",
+                apkUrl = "/android/cairnfield.apk"
             )
         )
-        assertNull(
-            UpdatePolicy.parseReleaseOffer(
-                "0.2.0",
-                releaseJson(
-                    tag = "v0.1.0",
-                    assets = """{"name":"cairnfield-android.apk","browser_download_url":"https://github.com/grahamsz/cairnfield/releases/download/v0.1.0/cairnfield-android.apk"}"""
-                )
-            )
-        )
-        assertNull(
-            UpdatePolicy.parseReleaseOffer(
-                "0.1.0",
-                releaseJson(tag = "v0.2.0", assets = """{"name":"cairnfield-server-linux-amd64","browser_download_url":"https://github.com/grahamsz/cairnfield/releases/download/v0.2.0/cairnfield-server-linux-amd64"}""")
-            )
-        )
-        assertNull(UpdatePolicy.parseReleaseOffer("0.1.0", JSONObject("""{"tag_name":"v0.2.0"}""")))
+
+        assertEquals("https://notes.example.com/android/cairnfield.apk", offer?.apkURL)
     }
 
     @Test
-    fun assetUrlsMustBeHttps() {
+    fun nonHttpsApkUrlsAreRejected() {
         assertNull(
-            UpdatePolicy.parseReleaseOffer(
-                "0.1.0",
-                releaseJson(
-                    tag = "v0.2.0",
-                    assets = """{"name":"cairnfield-android.apk","browser_download_url":"http://github.com/grahamsz/cairnfield/releases/download/v0.2.0/cairnfield-android.apk"}"""
+            UpdatePolicy.parseServerOffer(
+                installedVersionCode = 1,
+                serverBaseURL = "https://notes.example.com",
+                metadata = serverJson(
+                    versionCode = 2,
+                    versionName = "0.2.0",
+                    apkUrl = "http://notes.example.com/android/cairnfield.apk"
                 )
             )
         )
     }
 
-    private fun releaseJson(tag: String, assets: String): JSONObject = JSONObject(
-        """{"tag_name":"$tag","assets":[$assets]}"""
+    @Test
+    fun currentOrOlderServerVersionProducesNoOffer() {
+        assertNull(
+            UpdatePolicy.parseServerOffer(
+                installedVersionCode = 2,
+                serverBaseURL = "https://notes.example.com",
+                metadata = serverJson(
+                    versionCode = 2,
+                    versionName = "0.2.0",
+                    apkUrl = "android/cairnfield.apk"
+                )
+            )
+        )
+        assertNull(
+            UpdatePolicy.parseServerOffer(
+                installedVersionCode = 3,
+                serverBaseURL = "https://notes.example.com",
+                metadata = serverJson(
+                    versionCode = 2,
+                    versionName = "0.2.0",
+                    apkUrl = "android/cairnfield.apk"
+                )
+            )
+        )
+    }
+
+    @Test
+    fun missingRequiredFieldsProduceNoOffer() {
+        assertNull(
+            UpdatePolicy.parseServerOffer(
+                installedVersionCode = 1,
+                serverBaseURL = "https://notes.example.com",
+                metadata = serverJson(
+                    versionCode = 0,
+                    versionName = "0.2.0",
+                    apkUrl = "android/cairnfield.apk"
+                )
+            )
+        )
+        assertNull(
+            UpdatePolicy.parseServerOffer(
+                installedVersionCode = 1,
+                serverBaseURL = "https://notes.example.com",
+                metadata = serverJson(
+                    versionCode = 2,
+                    versionName = "",
+                    apkUrl = "android/cairnfield.apk"
+                )
+            )
+        )
+        assertNull(
+            UpdatePolicy.parseServerOffer(
+                installedVersionCode = 1,
+                serverBaseURL = "https://notes.example.com",
+                metadata = serverJson(
+                    versionCode = 2,
+                    versionName = "0.2.0",
+                    apkUrl = ""
+                )
+            )
+        )
+    }
+
+    @Test
+    fun invalidSha256IsRejected() {
+        assertNull(
+            UpdatePolicy.parseServerOffer(
+                installedVersionCode = 1,
+                serverBaseURL = "https://notes.example.com",
+                metadata = serverJson(
+                    versionCode = 2,
+                    versionName = "0.2.0",
+                    apkUrl = "android/cairnfield.apk",
+                    sha256 = "not-a-digest"
+                )
+            )
+        )
+    }
+
+    private fun serverJson(
+        versionCode: Int,
+        versionName: String,
+        apkUrl: String,
+        sha256: String = ""
+    ): JSONObject = JSONObject(
+        "{\"versionCode\":" + versionCode +
+            ",\"versionName\":\"" + versionName + "\"" +
+            ",\"apkUrl\":\"" + apkUrl + "\"" +
+            ",\"sha256\":\"" + sha256 + "\"}"
     )
 }

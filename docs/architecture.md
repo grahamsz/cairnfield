@@ -270,6 +270,16 @@ capture as an asset, records `header_json` (`kind: "webpage"|"clip"`, clip
 metadata, preview asset), and indexes merged search text. Clipped HTML is
 served back under a strict sandbox CSP.
 
+### Android app updates
+
+The server also serves the companion Android app directly. `GET
+/android/latest.json` returns `{versionCode, versionName, apkUrl, sha256}`
+(read from `frontend/dist/android/latest.json`, with `apkUrl` rewritten to
+the server's absolute public URL), and `GET /android/cairnfield.apk` streams
+the signed APK. The Android app checks these endpoints against its installed
+`versionCode` and self-updates when the server image changes. See
+[android.md](android.md) for the app and CI details.
+
 ### Import and export
 
 - **Export** (`backend/web/api_backup.go`): an async job (30-minute timeout,

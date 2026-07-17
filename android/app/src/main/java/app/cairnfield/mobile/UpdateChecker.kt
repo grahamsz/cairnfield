@@ -16,7 +16,6 @@ import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 
 object UpdateChecker {
-    private const val RELEASES_API_URL = "https://api.github.com/repos/grahamsz/cairnfield/releases/latest"
     private const val UPDATE_APK_FILENAME = "cairnfield-update.apk"
     private const val CHECK_INTERVAL_MS = 6 * 60 * 60_000L
     private const val MAX_APK_BYTES = 250L * 1024 * 1024
@@ -54,7 +53,7 @@ object UpdateChecker {
                 if (!shouldPrompt(update)) return@runOnUiThread
                 AlertDialog.Builder(activity)
                     .setTitle("cairnfield update ready")
-                    .setMessage("Version ${update.versionName} has been downloaded from GitHub.")
+                    .setMessage("Version ${update.versionName} has been downloaded from this server.")
                     .setNegativeButton("Later", null)
                     .setPositiveButton("Install") { _, _ -> openInstaller(activity) }
                     .show()
@@ -67,19 +66,22 @@ object UpdateChecker {
         val now = System.currentTimeMillis()
         if (!force && now - CairnfieldPrefs.lastUpdateCheck(context) < CHECK_INTERVAL_MS) return cached
 
-        val release = HttpJson.get(RELEASES_API_URL) ?: return cached
-        val tagName = release.optString("tag_name", "")
-        if (tagName.isNotBlank() && !UpdatePolicy.shouldOffer(tagName, BuildConfig.VERSION_NAME)) {
-            // The latest release is not newer than the installed build.
-            discardReadyUpdate(context)
+        val serverBaseURL = CairnfieldPrefs.serverBaseUrl(context)
+        if (serverBaseURL.isBlank()) return cached
+
+        val metadata = HttpJson.get("$serverBaseURL/android/latest.json") ?: return cached
+        val offer = UpdatePolicy.parseServerOffer(BuildConfig.VERSION_CODE, serverBaseURL, metadata)
+            ?: run {
+                // The server is up to date or the payload is unusable.
+                discardReadyUpdate(context)
+                CairnfieldPrefs.setLastUpdateCheck(context, now)
+                return null
+            }
+
+        if (!UpdatePolicy.needsAPKDownload(offer.versionCode, cached?.versionCode)) {
+            CairnfieldPrefs.setReadyUpdate(context, offer.versionName, offer.versionCode)
             CairnfieldPrefs.setLastUpdateCheck(context, now)
-            return null
-        }
-        val offer = UpdatePolicy.parseReleaseOffer(BuildConfig.VERSION_NAME, release) ?: return cached
-        if (!UpdatePolicy.needsAPKDownload(offer.versionName, cached?.versionName)) {
-            CairnfieldPrefs.setReadyUpdate(context, offer.versionName)
-            CairnfieldPrefs.setLastUpdateCheck(context, now)
-            return ReadyUpdate(offer.versionName)
+            return ReadyUpdate(offer.versionName, offer.versionCode)
         }
 
         val apk = download(context, offer.apkURL) ?: return cachedReadyUpdate(context)
@@ -87,27 +89,27 @@ object UpdateChecker {
             discardReadyUpdate(context)
             return null
         }
-        if (!UpdateAPKValidator.validate(context, apk, offer.versionName)) {
+        if (!UpdateAPKValidator.validate(context, apk, offer.versionCode)) {
             discardReadyUpdate(context)
             return null
         }
-        CairnfieldPrefs.setReadyUpdate(context, offer.versionName)
+        CairnfieldPrefs.setReadyUpdate(context, offer.versionName, offer.versionCode)
         CairnfieldPrefs.setLastUpdateCheck(context, now)
-        return ReadyUpdate(offer.versionName)
+        return ReadyUpdate(offer.versionName, offer.versionCode)
     }
 
     private fun cachedReadyUpdate(context: Context): ReadyUpdate? {
         val stored = CairnfieldPrefs.readyUpdate(context) ?: return null
         val apk = updateAPK(context)
         if (
-            !UpdatePolicy.shouldOffer(stored.versionName, BuildConfig.VERSION_NAME) ||
-            !UpdateAPKValidator.validate(context, apk, stored.versionName)
+            !UpdatePolicy.shouldOffer(stored.versionCode, BuildConfig.VERSION_CODE) ||
+            !UpdateAPKValidator.validate(context, apk, stored.versionCode)
         ) {
             CairnfieldPrefs.clearReadyUpdate(context)
             apk.delete()
             return null
         }
-        return ReadyUpdate(stored.versionName)
+        return ReadyUpdate(stored.versionName, stored.versionCode)
     }
 
     private fun download(context: Context, rawURL: String): File? {
@@ -184,8 +186,8 @@ object UpdateChecker {
     fun validatedUpdateAPK(context: Context): File? {
         val stored = CairnfieldPrefs.readyUpdate(context) ?: return null
         val apk = updateAPK(context)
-        if (!UpdatePolicy.shouldOffer(stored.versionName, BuildConfig.VERSION_NAME) ||
-            !UpdateAPKValidator.validate(context, apk, stored.versionName)
+        if (!UpdatePolicy.shouldOffer(stored.versionCode, BuildConfig.VERSION_CODE) ||
+            !UpdateAPKValidator.validate(context, apk, stored.versionCode)
         ) {
             CairnfieldPrefs.clearReadyUpdate(context)
             apk.delete()
@@ -212,5 +214,5 @@ object UpdateChecker {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    data class ReadyUpdate(val versionName: String)
+    data class ReadyUpdate(val versionName: String, val versionCode: Int)
 }

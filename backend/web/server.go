@@ -80,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	appMux := http.NewServeMux()
 	appMux.HandleFunc("/api/", s.handleAPI)
 	appMux.HandleFunc("/assets/", s.handleAsset)
+	appMux.HandleFunc("/android/latest.json", s.handleAndroidLatest)
+	appMux.HandleFunc("/android/cairnfield.apk", s.handleAndroidAPK)
 	appMux.HandleFunc("/", s.handleSPA)
 	var handler http.Handler = appMux
 	if s.basePath != "" {
@@ -2357,6 +2359,58 @@ func isAlphaSlug(value string) bool {
 		}
 	}
 	return true
+}
+
+type androidUpdateMetadata struct {
+	VersionCode int    `json:"versionCode"`
+	VersionName string `json:"versionName"`
+	APKURL      string `json:"apkUrl"`
+	SHA256      string `json:"sha256"`
+}
+
+func (s *Server) handleAndroidLatest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(s.staticDir, "android", "latest.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var metadata androidUpdateMetadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "invalid android update metadata")
+		return
+	}
+	metadata.APKURL = oidc.RequestBaseURL(r) + s.appPath("/android/cairnfield.apk")
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, metadata)
+}
+
+func (s *Server) handleAndroidAPK(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	apkPath := filepath.Join(s.staticDir, "android", "cairnfield.apk")
+	if _, err := os.Stat(apkPath); err != nil {
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.android.package-archive")
+	w.Header().Set("Content-Disposition", `attachment; filename="cairnfield.apk"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, apkPath)
 }
 
 func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {

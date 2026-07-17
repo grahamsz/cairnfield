@@ -1,8 +1,10 @@
 package app.cairnfield.mobile
 
 import org.json.JSONObject
+import java.net.URL
 
 data class UpdateOffer(
+    val versionCode: Int,
     val versionName: String,
     val apkURL: String,
     val sha256: String
@@ -14,73 +16,55 @@ object UpdatePolicy {
     fun normalizeVersionName(value: String): String =
         value.trim().removePrefix("v").removePrefix("V")
 
-    fun shouldOffer(candidateVersionName: String, installedVersionName: String): Boolean =
-        compareVersions(normalizeVersionName(candidateVersionName), normalizeVersionName(installedVersionName)) > 0
+    fun shouldOffer(candidateVersionCode: Int, installedVersionCode: Int): Boolean =
+        candidateVersionCode > installedVersionCode
 
-    fun needsAPKDownload(candidateVersionName: String, cachedVersionName: String?): Boolean =
-        normalizeVersionName(candidateVersionName) != cachedVersionName
+    fun needsAPKDownload(candidateVersionCode: Int, cachedVersionCode: Int?): Boolean =
+        candidateVersionCode != cachedVersionCode
 
     fun validSHA256(value: String): Boolean = value.isBlank() || sha256Pattern.matches(value)
 
     /**
-     * Compares dotted numeric versions ("0.10.2" > "0.9.9"). Non-numeric
-     * suffixes ("1.0.0-beta") compare by their leading digits.
+     * Builds an installable offer from the cairnfield server's `/android/latest.json`
+     * metadata. Relative `apkUrl` values are resolved against [serverBaseURL]. Only
+     * HTTPS URLs are accepted.
      */
-    internal fun compareVersions(candidate: String, installed: String): Int {
-        val left = versionParts(candidate)
-        val right = versionParts(installed)
-        val length = maxOf(left.size, right.size)
-        for (index in 0 until length) {
-            val a = left.getOrElse(index) { 0 }
-            val b = right.getOrElse(index) { 0 }
-            if (a != b) return a.compareTo(b)
-        }
-        return 0
+    fun parseServerOffer(
+        installedVersionCode: Int,
+        serverBaseURL: String,
+        metadata: JSONObject
+    ): UpdateOffer? {
+        val versionCode = metadata.optInt("versionCode", 0)
+        if (versionCode == 0 || !shouldOffer(versionCode, installedVersionCode)) return null
+
+        val versionName = metadata.optString("versionName", "").trim()
+        if (versionName.isBlank()) return null
+
+        val apkUrl = metadata.optString("apkUrl", "").trim()
+        if (apkUrl.isBlank()) return null
+        val resolvedURL = resolveApkURL(serverBaseURL, apkUrl) ?: return null
+
+        val sha256 = metadata.optString("sha256", "").trim()
+        if (!validSHA256(sha256)) return null
+
+        return UpdateOffer(versionCode, versionName, resolvedURL, sha256)
     }
 
-    private fun versionParts(value: String): List<Int> =
-        value.split('.').map { part -> part.takeWhile { it.isDigit() }.toIntOrNull() ?: 0 }
+    private fun resolveApkURL(serverBaseURL: String, apkUrl: String): String? {
+        if (apkUrl.isBlank()) return null
 
-    /**
-     * Builds an installable offer from a GitHub `releases/latest` payload,
-     * preferring an asset named `cairnfield-android.apk` and otherwise taking
-     * the first `.apk` asset.
-     */
-    fun parseReleaseOffer(installedVersionName: String, release: JSONObject): UpdateOffer? {
-        val versionName = normalizeVersionName(release.optString("tag_name", ""))
-        if (versionName.isBlank() || !shouldOffer(versionName, installedVersionName)) return null
-        val assets = release.optJSONArray("assets") ?: return null
-
-        var apkURL = ""
-        var sha256 = ""
-        var fallbackURL = ""
-        var fallbackSha256 = ""
-        for (index in 0 until assets.length()) {
-            val asset = assets.optJSONObject(index) ?: continue
-            val name = asset.optString("name", "")
-            if (!name.endsWith(".apk", ignoreCase = true)) continue
-            val url = asset.optString("browser_download_url", "").trim()
-            if (!url.startsWith("https://")) continue
-            val digest = asset.optString("digest", "").trim()
-                .takeIf { it.startsWith("sha256:") }
-                ?.removePrefix("sha256:")
-                .orEmpty()
-            if (!validSHA256(digest)) continue
-            if (name == PREFERRED_APK_NAME) {
-                apkURL = url
-                sha256 = digest
-                break
-            }
-            if (fallbackURL.isBlank()) {
-                fallbackURL = url
-                fallbackSha256 = digest
+        return try {
+            val direct = URL(apkUrl)
+            if (direct.protocol != "https") return null
+            direct.toString()
+        } catch (_: Exception) {
+            try {
+                val resolved = URL(URL(serverBaseURL), apkUrl)
+                if (resolved.protocol != "https") return null
+                resolved.toString()
+            } catch (_: Exception) {
+                null
             }
         }
-        val resolvedURL = apkURL.ifBlank { fallbackURL }
-        if (resolvedURL.isBlank()) return null
-        val resolvedSha256 = if (apkURL.isNotBlank()) sha256 else fallbackSha256
-        return UpdateOffer(versionName, resolvedURL, resolvedSha256)
     }
-
-    private const val PREFERRED_APK_NAME = "cairnfield-android.apk"
 }

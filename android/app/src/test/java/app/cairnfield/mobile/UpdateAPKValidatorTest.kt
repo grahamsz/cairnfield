@@ -1,5 +1,7 @@
 package app.cairnfield.mobile
 
+import android.content.pm.PackageInfo
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,6 +25,12 @@ class UpdateAPKValidatorTest {
         assertTrue(compatible(setOf("a", "b"), setOf("a", "b"), setOf("a", "b"), true, true))
         assertFalse(compatible(setOf("a", "b"), setOf("a"), setOf("a"), true, false))
         assertFalse(compatible(setOf("a", "b"), setOf("a", "c"), setOf("a", "c"), true, true))
+    }
+
+    @Test
+    fun versionCodeIsReadFromPackageInfo() {
+        val info = PackageInfo().apply { versionCode = 42 }
+        assertEquals(42, UpdateAPKValidator.versionCode(info))
     }
 
     private fun compatible(

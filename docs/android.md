@@ -3,7 +3,7 @@
 `android/` is a native Android companion app: a Kotlin WebView shell around a
 self-hosted cairnfield server, modeled on (and partly ported from) rolltop's
 Android app. It gives the web app an installable home-screen presence with a
-native loading animation, self-updates from GitHub releases, and the same
+native loading animation, self-updates from the same server, and the same
 offline support as the PWA.
 
 - Package / applicationId: `app.cairnfield.mobile`
@@ -55,27 +55,40 @@ rolltop) coordinates the crossfade from loading view to WebView. The launcher
 icon, monochrome icon, and Android 12+ splash all use the same cairn on the
 paper background `#f2f0eb`.
 
-### Self-updates
+## Self-updates from the same server
 
-The app updates itself from GitHub releases — no Play Store involved:
+The app updates itself from the cairnfield server it is connected to — not
+from a separate store or GitHub release feed. Whenever the server's Docker
+image is rebuilt with a newer APK, the app offers to install it.
+
+The server exposes two endpoints:
+
+- `GET /android/latest.json` — update metadata: `{versionCode, versionName,
+  apkUrl, sha256}`. `apkUrl` is rewritten by the server to the absolute public
+  URL of the APK, honoring reverse-proxy headers and `CAIRNFIELD_BASE_PATH`.
+- `GET /android/cairnfield.apk` — the signed APK, served with
+  `Content-Disposition: attachment; filename="cairnfield.apk"`.
+
+Update flow:
 
 1. A daily `UpdateCheckWorker` and a foreground check on `MainActivity.onStart`
-   call `https://api.github.com/repos/grahamsz/cairnfield/releases/latest`.
-2. `UpdatePolicy` compares `tag_name` (leading `v` stripped) against
-   `BuildConfig.VERSION_NAME` and picks the `cairnfield-android.apk` asset
-   (fallback: first `.apk`, HTTPS only), honoring its SHA-256 digest when the
-   release provides one.
-3. A newer version prompts once per version (`UpdatePromptPolicy`); on accept
-   the APK downloads to `cacheDir/updates` (250 MB cap), is verified
-   (`UpdateAPKValidator`: package name, versionName, and signing-lineage
-   compatibility — an APK signed with a different key is rejected), and
-   installed via `UpdateInstallActivity` with a FileProvider
-   (`REQUEST_INSTALL_PACKAGES`; the user is sent to the unknown-sources
-   setting first if needed).
+   fetch `{server}/android/latest.json`.
+2. `UpdatePolicy` compares `versionCode` from the server against
+   `BuildConfig.VERSION_CODE`.
+3. A newer version prompts once per `versionCode` (`UpdatePromptPolicy`);
+   on accept, the APK downloads from the resolved `apkUrl` to
+   `cacheDir/updates` (250 MB cap).
+4. Optional SHA-256 check, then `UpdateAPKValidator` verifies package name,
+   matching `versionCode`, and signing-lineage compatibility before installing
+   via `UpdateInstallActivity` with a FileProvider
+   (`REQUEST_INSTALL_PACKAGES`; unknown-sources permission requested first if
+   needed).
 
-Because update checks compare version **names**, every tag must bump the
-version: CI derives `versionName` from the tag, so tagging `v0.2.0` is enough
-— see [CI and signing](#ci-and-signing).
+The APK is bundled into the Docker image under `frontend/dist/android/`:
+CI builds the signed release APK, copies it to `frontend/public/android/`,
+generates `latest.json`, and Vite copies the directory into `frontend/dist/`
+during `npm run build`. The web app's Settings page also links directly to
+`/android/cairnfield.apk` for first-time installs.
 
 ## Building locally
 
@@ -98,14 +111,18 @@ to the debug signature so local release builds never fail:
 
 ## CI and signing
 
-`.github/workflows/android.yml` runs on every push/PR and on `v*` tags:
-unit tests → debug APK (uploaded as a workflow artifact) → on tags only,
-a signed release APK published to the GitHub release as
-`cairnfield-android.apk` (the exact name the update checker looks for).
-`versionName` comes from the tag (`v0.2.0` → `0.2.0`), `versionCode` from the
-run number.
+`.github/workflows/ci.yml` builds and embeds the Android app into the Docker
+image on every push/PR:
 
-Signing secrets (repository secrets, all required for tagged builds):
+- On all pushes: Android unit tests + debug APK artifact.
+- On non-PR pushes (where signing secrets are available): signed release APK
+  → `frontend/public/android/cairnfield.apk` + `latest.json` → Vite copies it
+  into `frontend/dist/android/` → Docker image contains it.
+- A verification step extracts the APK from the built image and confirms the
+  metadata `sha256` and `versionCode` match the actual APK.
+
+Signing secrets (repository secrets, required for the release APK to be
+embedded):
 
 | Secret | Content |
 | --- | --- |
