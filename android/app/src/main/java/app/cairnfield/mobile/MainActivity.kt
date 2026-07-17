@@ -1,0 +1,560 @@
+package app.cairnfield.mobile
+
+import android.Manifest
+import android.app.AlertDialog
+import android.app.DownloadManager
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.net.Uri
+import android.net.http.SslError
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.SslErrorHandler
+import android.webkit.URLUtil
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.webkit.ServiceWorkerClientCompat
+import androidx.webkit.ServiceWorkerControllerCompat
+import androidx.webkit.WebViewFeature
+import org.json.JSONObject
+
+class MainActivity : ComponentActivity() {
+    private var webView: WebView? = null
+    private var cairnfieldWebChromeClient: CairnfieldWebChromeClient? = null
+    private var loadingOverlay: FrameLayout? = null
+    private var loadingAnimationView: CairnfieldLoadingView? = null
+    private var loadingRevealGate: LoadingRevealGate? = null
+    private var updatePromptPolicy = UpdatePromptPolicy()
+    private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        updatePromptPolicy = UpdatePromptPolicy(savedInstanceState?.getString(STATE_PROMPTED_UPDATE_NAME).orEmpty())
+        installBackNavigation()
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
+        NotificationChannels.ensure(this)
+        UpdateCheckWorker.schedule(this)
+        requestNotificationPermission()
+        if (CairnfieldPrefs.serverUrl(this).isBlank()) {
+            showSetup()
+        } else {
+            showWeb(
+                intent,
+                savedInstanceState?.getBundle(STATE_WEB_VIEW),
+                savedInstanceState?.getLong(STATE_LOADING_ANIMATION_ELAPSED_MS) ?: 0L
+            )
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        checkForAppUpdate()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (webView == null) {
+            if (CairnfieldPrefs.serverUrl(this).isBlank()) showSetup() else showWeb(intent)
+        }
+    }
+
+    override fun onPause() {
+        rememberCurrentLocation()
+        CookieManager.getInstance().flush()
+        super.onPause()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        rememberCurrentLocation()
+        outState.putString(STATE_PROMPTED_UPDATE_NAME, updatePromptPolicy.lastPromptedVersionName)
+        outState.putLong(
+            STATE_LOADING_ANIMATION_ELAPSED_MS,
+            loadingAnimationView?.elapsedMs ?: CairnfieldLoadingView.DURATION_MS
+        )
+        webView?.let { view ->
+            val state = Bundle()
+            view.saveState(state)
+            outState.putBundle(STATE_WEB_VIEW, state)
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onDestroy() {
+        cancelLoadingExperience()
+        cairnfieldWebChromeClient?.cancelPendingRequest()
+        cairnfieldWebChromeClient = null
+        webView?.destroy()
+        webView = null
+        super.onDestroy()
+    }
+
+    @Deprecated("The file chooser uses the platform activity result callback.")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (cairnfieldWebChromeClient?.handleActivityResult(requestCode, resultCode, data) == true) return
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
+    private fun showSetup(initialUrl: String = CairnfieldPrefs.serverUrl(this), message: String = "") {
+        cancelLoadingExperience()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(SHELL_BACKGROUND)
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+        val title = TextView(this).apply {
+            text = "cairnfield"
+            textSize = 28f
+        }
+        val feedback = TextView(this).apply {
+            text = message
+            setTextColor(Color.rgb(151, 43, 43))
+            visibility = if (message.isBlank()) View.GONE else View.VISIBLE
+        }
+        val input = EditText(this).apply {
+            hint = "https://notes.example.com"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+            setText(initialUrl)
+            setSelection(text.length)
+        }
+        val connect = Button(this).apply { text = "Connect" }
+        connect.setOnClickListener {
+            val normalized = CairnfieldPrefs.normalizeBaseUrl(input.text.toString())
+            if (normalized.isEmpty()) {
+                input.error = "Enter a valid HTTPS cairnfield server URL."
+                input.requestFocus()
+                return@setOnClickListener
+            }
+
+            input.isEnabled = false
+            connect.isEnabled = false
+            connect.text = "Checking..."
+            feedback.setTextColor(Color.rgb(74, 81, 78))
+            feedback.text = "Checking the cairnfield server..."
+            feedback.visibility = View.VISIBLE
+
+            Thread({
+                val result = CairnfieldServerValidator.validate(normalized)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    input.isEnabled = true
+                    connect.isEnabled = true
+                    connect.text = "Connect"
+                    if (!result.valid) {
+                        feedback.setTextColor(Color.rgb(151, 43, 43))
+                        feedback.text = result.message
+                        return@runOnUiThread
+                    }
+                    CairnfieldPrefs.setServerUrl(this@MainActivity, normalized)
+                    showWeb(intent)
+                }
+            }, "cairnfield-server-check").start()
+        }
+        root.addView(title, spacedLayoutParams(top = 0, bottom = 12))
+        root.addView(feedback, spacedLayoutParams(bottom = 12))
+        root.addView(input, spacedLayoutParams(bottom = 8))
+        root.addView(connect, spacedLayoutParams(bottom = 4))
+        applySystemBarInsets(root, dp(24))
+        setContentView(root)
+    }
+
+    private fun showWeb(
+        sourceIntent: Intent?,
+        restoredState: Bundle? = null,
+        restoredLoadingElapsedMs: Long = 0L
+    ) {
+        cancelLoadingExperience()
+        val view = WebView(this)
+        view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        webView = view
+        val serverOrigin = CairnfieldPrefs.serverUrl(this)
+        val loadingAnimation = CairnfieldLoadingView(this).apply {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        val loadingOverlay = FrameLayout(this).apply {
+            setBackgroundColor(SHELL_BACKGROUND)
+            isClickable = true
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            contentDescription = getString(R.string.app_name)
+            setOnLongClickListener {
+                showServerChangePrompt()
+                true
+            }
+            addView(
+                loadingAnimation,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+        fun removeLoadingOverlay() {
+            (view.parent as? View)?.setBackgroundColor(Color.WHITE)
+            (loadingOverlay.parent as? ViewGroup)?.removeView(loadingOverlay)
+            if (this.loadingOverlay === loadingOverlay) this.loadingOverlay = null
+            if (loadingAnimationView === loadingAnimation) loadingAnimationView = null
+        }
+        lateinit var revealGate: LoadingRevealGate
+        revealGate = LoadingRevealGate {
+            if (webView !== view || loadingRevealGate !== revealGate || loadingOverlay.parent == null) {
+                return@LoadingRevealGate
+            }
+            loadingRevealGate = null
+            loadingOverlay.isClickable = false
+            loadingOverlay.setOnLongClickListener(null)
+            loadingOverlay.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+            if (!loadingAnimation.animationsEnabled) {
+                removeLoadingOverlay()
+            } else {
+                loadingOverlay.animate()
+                    .alpha(0f)
+                    .setDuration(LOADING_CROSSFADE_MS)
+                    .withEndAction(::removeLoadingOverlay)
+                    .start()
+            }
+        }
+        loadingAnimation.onAnimationComplete = revealGate::markAnimationReady
+        enableServiceWorkers()
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
+        view.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            cacheMode = WebSettings.LOAD_DEFAULT
+            mediaPlaybackRequiresUserGesture = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            setSupportMultipleWindows(true)
+        }
+        view.addJavascriptInterface(AndroidWebBridge(), "cairnfieldAndroid")
+        view.webViewClient = object : WebViewClient() {
+            private var mainFrameCommitted = false
+            private var failureHandled = false
+            private var mainNavigationGeneration = 0L
+
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val url = request.url.toString()
+                val context = WebNavigationContext(
+                    isMainFrame = request.isForMainFrame,
+                    hasUserGesture = request.hasGesture(),
+                    isRedirect = request.isRedirect
+                )
+                val action = WebNavigationPolicy.action(serverOrigin, url, context)
+                val handled = handleWebNavigation(url, context, action)
+                if (action == WebNavigationAction.BLOCK && request.isForMainFrame &&
+                    (request.isRedirect || !request.hasGesture())
+                ) {
+                    failInitialLoad(view, "The server redirected outside the configured cairnfield address.")
+                }
+                return handled
+            }
+
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                mainNavigationGeneration += 1
+                injectAndroidBridge(view)
+                if (webView === view && loadingRevealGate === revealGate) {
+                    revealGate.markContentPending()
+                }
+            }
+
+            override fun onPageCommitVisible(view: WebView, url: String) {
+                mainFrameCommitted = true
+                CairnfieldPrefs.rememberVisitedUrl(this@MainActivity, url)
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                CairnfieldPrefs.rememberVisitedUrl(this@MainActivity, url)
+                if (CairnfieldPrefs.internalLocation(serverOrigin, url) != null) {
+                    val expectedGeneration = mainNavigationGeneration
+                    view.postVisualStateCallback(System.nanoTime(), object : WebView.VisualStateCallback() {
+                        override fun onComplete(requestId: Long) {
+                            if (webView !== view || loadingRevealGate !== revealGate ||
+                                mainNavigationGeneration != expectedGeneration ||
+                                CairnfieldPrefs.internalLocation(serverOrigin, view.url.orEmpty()) == null
+                            ) return
+                            revealGate.markContentReady()
+                        }
+                    })
+                }
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                CairnfieldPrefs.rememberVisitedUrl(this@MainActivity, url)
+            }
+
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame) {
+                    failInitialLoad(view, "Could not connect to this cairnfield server. Check the address and try again.")
+                }
+            }
+
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+                if (request.isForMainFrame && errorResponse.statusCode >= 400) {
+                    failInitialLoad(view, "The server did not recognize cairnfield at this address. Check the URL and try again.")
+                }
+            }
+
+            override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
+                handler.cancel()
+                failInitialLoad(view, "cairnfield could not verify this server's HTTPS certificate. Check the URL and certificate, then try again.")
+            }
+
+            private fun failInitialLoad(view: WebView, message: String) {
+                if (mainFrameCommitted || failureHandled) return
+                failureHandled = true
+                view.post { showConnectionFailure(view, message) }
+            }
+        }
+        cairnfieldWebChromeClient = CairnfieldWebChromeClient(this) { navigation ->
+            handleWebNavigation(
+                navigation.url,
+                WebNavigationContext(
+                    isMainFrame = true,
+                    hasUserGesture = navigation.hasUserGesture,
+                    isRedirect = navigation.isRedirect,
+                    isNewWindow = true
+                )
+            )
+        }.also { view.webChromeClient = it }
+        view.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            startDownload(url, userAgent, contentDisposition, mimeType)
+        }
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(SHELL_BACKGROUND)
+            addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(loadingOverlay, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        this.loadingOverlay = loadingOverlay
+        loadingAnimationView = loadingAnimation
+        loadingRevealGate = revealGate
+        applySystemBarInsets(root)
+        setContentView(root)
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) checkForAppUpdate()
+
+        val restored = restoredState != null && view.restoreState(restoredState) != null
+        if (restored) view.reload() else view.loadUrl(urlForIntent())
+        loadingAnimation.start(restoredLoadingElapsedMs)
+    }
+
+    private fun urlForIntent(): String {
+        return CairnfieldPrefs.lastVisitedUrl(this).takeIf { it.isNotBlank() }
+            ?: CairnfieldPrefs.buildUrl(this, "/")
+    }
+
+    private fun showConnectionFailure(failedView: WebView, message: String) {
+        if (webView !== failedView || isFinishing || isDestroyed) return
+        cancelLoadingExperience()
+        cairnfieldWebChromeClient?.cancelPendingRequest()
+        cairnfieldWebChromeClient = null
+        webView = null
+        failedView.stopLoading()
+        showSetup(CairnfieldPrefs.serverUrl(this), message)
+        failedView.destroy()
+    }
+
+    private fun showServerChangePrompt() {
+        AlertDialog.Builder(this)
+            .setTitle("Change server")
+            .setMessage("Connect to a different cairnfield server?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Change") { _, _ ->
+                cancelLoadingExperience()
+                cairnfieldWebChromeClient?.cancelPendingRequest()
+                cairnfieldWebChromeClient = null
+                val view = webView
+                webView = null
+                view?.stopLoading()
+                showSetup(CairnfieldPrefs.serverUrl(this))
+                view?.destroy()
+            }
+            .show()
+    }
+
+    private fun cancelLoadingExperience() {
+        loadingRevealGate?.cancel()
+        loadingRevealGate = null
+        loadingAnimationView?.cancel()
+        loadingAnimationView = null
+        loadingOverlay?.animate()?.cancel()
+        (loadingOverlay?.parent as? ViewGroup)?.removeView(loadingOverlay)
+        loadingOverlay = null
+    }
+
+    private fun rememberCurrentLocation() {
+        CairnfieldPrefs.rememberVisitedUrl(this, webView?.url)
+    }
+
+    private fun handleWebNavigation(
+        candidate: String,
+        context: WebNavigationContext,
+        action: WebNavigationAction = WebNavigationPolicy.action(CairnfieldPrefs.serverUrl(this), candidate, context)
+    ): Boolean {
+        return when (action) {
+            WebNavigationAction.ALLOW_IN_WEBVIEW -> false
+            WebNavigationAction.OPEN_INTERNAL -> {
+                webView?.loadUrl(candidate)
+                true
+            }
+            WebNavigationAction.OPEN_EXTERNAL -> {
+                openExternalUrl(candidate)
+                true
+            }
+            WebNavigationAction.BLOCK -> {
+                if (context.isMainFrame && context.hasUserGesture && !context.isRedirect) {
+                    Toast.makeText(this, "cairnfield blocked an unsupported link.", Toast.LENGTH_SHORT).show()
+                }
+                true
+            }
+        }
+    }
+
+    private fun openExternalUrl(candidate: String) {
+        val uri = Uri.parse(candidate)
+        if (uri.scheme?.lowercase() !in setOf("http", "https", "mailto")) return
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "No app can open this link.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun startDownload(url: String?, userAgent: String?, contentDisposition: String?, mimeType: String?) {
+        val uri = Uri.parse(url.orEmpty())
+        if (uri.scheme?.lowercase() !in setOf("http", "https")) {
+            Toast.makeText(this, "This download is not supported.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+        val request = DownloadManager.Request(uri).apply {
+            setMimeType(mimeType)
+            addRequestHeader("User-Agent", userAgent.orEmpty())
+            CookieManager.getInstance().getCookie(url)?.let { addRequestHeader("Cookie", it) }
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+        }
+        try {
+            getSystemService(DownloadManager::class.java).enqueue(request)
+            Toast.makeText(this, "Downloading $fileName", Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, "Could not start the download.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun injectAndroidBridge(view: WebView) {
+        val name = JSONObject.quote(BuildConfig.VERSION_NAME)
+        val code = BuildConfig.VERSION_CODE
+        view.evaluateJavascript(
+            "window.cairnfieldAndroid = {" +
+                "versionName: $name, " +
+                "versionCode: $code, " +
+                "getVersionName: function() { return $name; }, " +
+                "getVersionCode: function() { return $code; }" +
+                "};",
+            null
+        )
+    }
+
+    private fun checkForAppUpdate() {
+        if (CairnfieldPrefs.serverUrl(this).isBlank()) return
+        UpdateChecker.checkInForeground(this, force = true, shouldPrompt = updatePromptPolicy::shouldPrompt)
+    }
+
+    private fun enableServiceWorkers() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_BASIC_USAGE)) return
+        // Installing a (pass-through) client opts the WebView into service worker support.
+        ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(object : ServiceWorkerClientCompat() {
+            override fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? = null
+        })
+    }
+
+    private fun installBackNavigation() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                val view = webView
+                if (view?.canGoBack() == true) {
+                    view.goBack()
+                    return
+                }
+                AndroidBackNavigation.noteFallbackUrl(CairnfieldPrefs.serverUrl(this@MainActivity), view?.url)
+                    ?.let {
+                        view?.loadUrl(it)
+                        return
+                    }
+
+                isEnabled = false
+                onBackPressedDispatcher.onBackPressed()
+            }
+        })
+    }
+
+    private fun applySystemBarInsets(view: View, contentPadding: Int = 0) {
+        ViewCompat.setOnApplyWindowInsetsListener(view) { target, insets ->
+            val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            val keyboard = insets.getInsets(WindowInsetsCompat.Type.ime())
+            target.setPadding(
+                contentPadding + safe.left,
+                contentPadding + safe.top,
+                contentPadding + safe.right,
+                contentPadding + maxOf(safe.bottom, keyboard.bottom)
+            )
+            insets
+        }
+        ViewCompat.requestApplyInsets(view)
+    }
+
+    private fun spacedLayoutParams(top: Int = 0, bottom: Int = 0) =
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(top)
+            bottomMargin = dp(bottom)
+        }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    companion object {
+        private const val STATE_WEB_VIEW = "cairnfield.web_view_state"
+        private const val STATE_PROMPTED_UPDATE_NAME = "cairnfield.prompted_update_name"
+        private const val STATE_LOADING_ANIMATION_ELAPSED_MS = "cairnfield.loading_animation_elapsed_ms"
+        private const val LOADING_CROSSFADE_MS = 160L
+        private val SHELL_BACKGROUND = Color.rgb(242, 240, 235)
+    }
+}

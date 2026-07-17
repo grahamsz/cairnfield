@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">cairnfield</string>
+    <string name="notification_channel_updates">Updates</string>
+</resources>

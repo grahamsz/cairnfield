@@ -76,6 +76,7 @@ export const api = {
   versions: (id: number) => getJSON<{ versions: NoteVersion[] }>(`/api/notes/${id}/versions`),
   restore: (csrf: string, id: number, versionID: number) => postJSON<{ note: Note; version: NoteVersion }>(`/api/notes/${id}/restore`, csrf, { version_id: versionID }),
   share: (csrf: string, id: number, body: { email: string; permission: "read" | "write" }) => postJSON<{ ok: boolean }>(`/api/notes/${id}/share`, csrf, body),
+  removeShare: (csrf: string, id: number, userID: number) => deleteJSON<{ ok: boolean }>(`/api/notes/${id}/share/${userID}`, csrf),
   templates: () => getJSON<{ templates: Template[] }>("/api/templates"),
   saveTemplate: (csrf: string, template: Partial<Template>) =>
     template.id ? putJSON<{ template: Template }>(`/api/templates/${template.id}`, csrf, template) : postJSON<{ template: Template }>("/api/templates", csrf, template),

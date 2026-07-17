@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -169,15 +170,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			is_default INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS outbox_edits (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			note_id INTEGER NOT NULL,
-			payload_json TEXT NOT NULL,
-			status TEXT NOT NULL DEFAULT 'pending',
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
-		)`,
+		`DROP TABLE IF EXISTS outbox_edits`,
 		`CREATE TABLE IF NOT EXISTS backup_exports (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -267,15 +260,27 @@ func (s *Store) uniqueSlug(ctx context.Context, table string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		var n int
-		if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE slug = ?`, table), slug).Scan(&n); err != nil {
+		free, err := s.slugFree(ctx, table, slug)
+		if err != nil {
 			return "", err
 		}
-		if n == 0 {
+		if free {
 			return slug, nil
 		}
 	}
 	return "", errors.New("could not generate unique slug")
+}
+
+// slugFree reports whether the given slug is not used in the table yet.
+func (s *Store) slugFree(ctx context.Context, table, slug string) (bool, error) {
+	if slug == "" {
+		return false, nil
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE slug = ?`, table), slug).Scan(&n); err != nil {
+		return false, err
+	}
+	return n == 0, nil
 }
 
 func (s *Store) backfillSlugs(ctx context.Context) error {
@@ -720,6 +725,18 @@ func (s *Store) CreateFolder(ctx context.Context, userID int64, path string) (Fo
 	return f, nil
 }
 
+// EnsureFolder inserts the folder row when missing and reports whether it was created.
+func (s *Store) EnsureFolder(ctx context.Context, userID int64, path string) (bool, error) {
+	path = normalizeFolder(path)
+	ts := nowUnix()
+	res, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO folders (user_id, path, created_at, updated_at) VALUES (?, ?, ?, ?)`, userID, path, ts, ts)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := res.RowsAffected()
+	return affected > 0, nil
+}
+
 func (s *Store) SetFolderDisplayMode(ctx context.Context, userID int64, path, mode string) (Folder, error) {
 	path = normalizeFolder(path)
 	sortMode := "newest"
@@ -1113,6 +1130,62 @@ func (s *Store) CreateNoteWithContentAt(ctx context.Context, userID int64, title
 		return Note{}, NoteVersion{}, err
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO notes (owner_user_id, folder_path, title, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, userID, folder, title, slug, ts, ts)
+	if err != nil {
+		_ = tx.Rollback()
+		return Note{}, NoteVersion{}, err
+	}
+	noteID, _ := res.LastInsertId()
+	versionID, err := insertVersionAt(ctx, tx, noteID, userID, content, "{}", 0, "import", false, ts)
+	if err != nil {
+		_ = tx.Rollback()
+		return Note{}, NoteVersion{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE notes SET current_version_id = ? WHERE id = ?`, versionID, noteID); err != nil {
+		_ = tx.Rollback()
+		return Note{}, NoteVersion{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO folders (user_id, path, created_at, updated_at) VALUES (?, ?, ?, ?)`, userID, folder, ts, ts); err != nil {
+		_ = tx.Rollback()
+		return Note{}, NoteVersion{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Note{}, NoteVersion{}, err
+	}
+	return s.GetNote(ctx, userID, noteID)
+}
+
+// CreateRestoredNote inserts a note from a backup restore, keeping the requested
+// slug when it is still globally free and preserving timestamps and trash state.
+// The note gets a single version row which becomes its current version.
+func (s *Store) CreateRestoredNote(ctx context.Context, userID int64, title, folder, content, slug string, encrypted bool, trashedAt, timestamp time.Time) (Note, NoteVersion, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "Untitled"
+	}
+	folder = normalizeFolder(folder)
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	ts := timestamp.UTC().Unix()
+	free, err := s.slugFree(ctx, "notes", slug)
+	if err != nil {
+		return Note{}, NoteVersion{}, err
+	}
+	if !free {
+		slug, err = s.uniqueSlug(ctx, "notes")
+		if err != nil {
+			return Note{}, NoteVersion{}, err
+		}
+	}
+	trashed := int64(0)
+	if !trashedAt.IsZero() {
+		trashed = trashedAt.UTC().Unix()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Note{}, NoteVersion{}, err
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO notes (owner_user_id, folder_path, title, slug, is_encrypted, trashed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, userID, folder, title, slug, boolInt(encrypted), trashed, ts, ts)
 	if err != nil {
 		_ = tx.Rollback()
 		return Note{}, NoteVersion{}, err
@@ -1845,8 +1918,27 @@ func (s *Store) UpsertShare(ctx context.Context, ownerID, noteID int64, email, p
 }
 
 func (s *Store) DeleteShare(ctx context.Context, ownerID, noteID, sharedUserID int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM note_shares WHERE owner_user_id = ? AND note_id = ? AND shared_user_id = ?`, ownerID, noteID, sharedUserID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM note_shares WHERE owner_user_id = ? AND note_id = ? AND shared_user_id = ?`, ownerID, noteID, sharedUserID)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		_ = tx.Rollback()
+		return ErrNotFound
+	}
+	// The recipient's private overlay (placement, trash, star) is meaningless
+	// once the note is no longer shared with them.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM note_user_state WHERE note_id = ? AND user_id = ?`, noteID, sharedUserID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListShares(ctx context.Context, ownerID, noteID int64) ([]Share, error) {
@@ -1883,6 +1975,35 @@ func (s *Store) CreateAsset(ctx context.Context, a Asset) (Asset, error) {
 	return a, nil
 }
 
+// CreateRestoredAsset inserts an asset from a backup restore, keeping the
+// requested slug when it is still globally free and preserving created_at.
+func (s *Store) CreateRestoredAsset(ctx context.Context, a Asset) (Asset, error) {
+	ts := a.CreatedAt.UTC().Unix()
+	if ts == 0 {
+		ts = nowUnix()
+	}
+	slug := a.Slug
+	free, err := s.slugFree(ctx, "assets", slug)
+	if err != nil {
+		return Asset{}, err
+	}
+	if !free {
+		slug, err = s.uniqueSlug(ctx, "assets")
+		if err != nil {
+			return Asset{}, err
+		}
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO assets (slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, search_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		slug, a.UserID, a.NoteID, a.VersionID, a.Filename, a.ContentType, a.BlobPath, a.SHA256, a.Size, boolInt(a.Encrypted), strings.TrimSpace(a.SearchText), ts)
+	if err != nil {
+		return Asset{}, err
+	}
+	a.ID, _ = res.LastInsertId()
+	a.Slug = slug
+	a.CreatedAt = unixTime(ts)
+	return a, nil
+}
+
 func (s *Store) GetAsset(ctx context.Context, userID, assetID int64) (Asset, error) {
 	var a Asset
 	var created int64
@@ -1905,6 +2026,30 @@ func (s *Store) GetAssetBySlug(ctx context.Context, userID int64, slug string) (
 	var created int64
 	var encrypted int
 	err := s.db.QueryRowContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, search_text, created_at FROM assets WHERE slug = ? AND user_id = ?`, slug, userID).
+		Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &a.SearchText, &created)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Asset{}, ErrNotFound
+		}
+		return Asset{}, err
+	}
+	a.Encrypted = encrypted != 0
+	a.CreatedAt = unixTime(created)
+	return a, nil
+}
+
+// GetAssetUnscoped returns the asset identified by a numeric id or slug
+// regardless of which user owns it. Callers must check access themselves.
+func (s *Store) GetAssetUnscoped(ctx context.Context, key string) (Asset, error) {
+	where := `slug = ?`
+	arg := any(key)
+	if id, err := strconv.ParseInt(key, 10, 64); err == nil && id > 0 {
+		where, arg = `id = ?`, any(id)
+	}
+	var a Asset
+	var created int64
+	var encrypted int
+	err := s.db.QueryRowContext(ctx, `SELECT id, slug, user_id, note_id, version_id, filename, content_type, blob_path, sha256, size, encrypted, search_text, created_at FROM assets WHERE `+where, arg).
 		Scan(&a.ID, &a.Slug, &a.UserID, &a.NoteID, &a.VersionID, &a.Filename, &a.ContentType, &a.BlobPath, &a.SHA256, &a.Size, &encrypted, &a.SearchText, &created)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -2169,7 +2314,7 @@ func (s *Store) SearchDocumentsForCurrentNotes(ctx context.Context, userID int64
 		EXISTS(SELECT 1 FROM assets a WHERE a.note_id = n.id)
 		FROM notes n JOIN note_versions nv ON nv.id = n.current_version_id
 		LEFT JOIN assets a ON a.note_id = n.id AND a.encrypted = 0 AND a.search_text != ''
-		WHERE n.owner_user_id = ? AND n.is_encrypted = 0
+		WHERE n.owner_user_id = ? AND n.is_encrypted = 0 AND n.trashed_at = 0
 		GROUP BY n.id`, userID)
 	if err != nil {
 		return nil, err

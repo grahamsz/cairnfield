@@ -784,9 +784,19 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 			writeStoreError(w, err)
 			return
 		}
-		s.indexCurrent(r.Context(), note, version)
+		if note.OwnerUserID == cu.User.ID {
+			s.indexCurrent(r.Context(), note, version)
+		}
 		writeJSON(w, map[string]any{"note": note, "version": version})
 	case "share":
+		if len(parts) == 3 {
+			s.handleDeleteShare(w, r, cu, key, parts[2])
+			return
+		}
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
 			return
@@ -813,6 +823,9 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 		if err != nil {
 			writeStoreError(w, err)
 			return
+		}
+		if note.OwnerUserID == cu.User.ID {
+			s.deleteFromIndex(r.Context(), cu.User.ID, note.ID)
 		}
 		writeJSON(w, map[string]any{"note": note, "version": version})
 	case "restore":
@@ -866,14 +879,51 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 			methodNotAllowed(w)
 			return
 		}
+		note, _, err := s.store.GetNote(r.Context(), cu.User.ID, id)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
 		if err := s.store.WipeNote(r.Context(), cu.User.ID, id); err != nil {
 			writeStoreError(w, err)
 			return
+		}
+		if note.OwnerUserID == cu.User.ID {
+			s.deleteFromIndex(r.Context(), note.OwnerUserID, note.ID)
 		}
 		writeJSON(w, map[string]any{"ok": true})
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleDeleteShare removes a share from a note. The owner may remove any
+// recipient; anyone else may only remove their own user id (leave a note
+// shared with them).
+func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request, cu currentUser, key, userIDRaw string) {
+	if r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	targetID, err := strconv.ParseInt(userIDRaw, 10, 64)
+	if err != nil || targetID <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	note, _, err := s.noteByKey(r.Context(), cu.User.ID, key)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if cu.User.ID != note.OwnerUserID && targetID != cu.User.ID {
+		writeAPIError(w, http.StatusForbidden, "owner access required")
+		return
+	}
+	if err := s.store.DeleteShare(r.Context(), note.OwnerUserID, note.ID, targetID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) apiFolders(w http.ResponseWriter, r *http.Request) {
@@ -1241,6 +1291,15 @@ func (s *Server) apiImport(w http.ResponseWriter, r *http.Request) {
 		zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			writeAPIError(w, http.StatusBadRequest, "invalid zip archive")
+			return
+		}
+		if manifest, ok := readBackupManifest(zr); ok {
+			result, err := s.restoreBackupZip(r.Context(), cu.User.ID, manifest, zr)
+			if err != nil {
+				writeAPIError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSON(w, result)
 			return
 		}
 		archiveFiles := map[string]importArchiveFile{}
@@ -1985,11 +2044,14 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asset, err := s.assetByKey(r.Context(), cu.User.ID, key)
+	if errors.Is(err, store.ErrNotFound) {
+		asset, err = s.sharedAssetByKey(r.Context(), cu.User.ID, key)
+	}
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	f, err := s.blobs.OpenUserBlob(cu.User.ID, asset.BlobPath)
+	f, err := s.blobs.OpenUserBlob(asset.UserID, asset.BlobPath)
 	if err != nil {
 		writeAPIError(w, http.StatusNotFound, "asset not found")
 		return
@@ -2185,6 +2247,13 @@ func (s *Server) indexCurrent(ctx context.Context, note store.Note, version stor
 	})
 }
 
+func (s *Server) deleteFromIndex(ctx context.Context, userID, noteID int64) {
+	if s.search == nil {
+		return
+	}
+	_ = s.search.Delete(ctx, userID, noteID)
+}
+
 func parsePositiveInt(value string, fallback int) int {
 	n, err := strconv.Atoi(value)
 	if err != nil || n <= 0 {
@@ -2237,6 +2306,23 @@ func (s *Server) assetByKey(ctx context.Context, userID int64, key string) (stor
 		return s.store.GetAsset(ctx, userID, id)
 	}
 	return s.store.GetAssetBySlug(ctx, userID, key)
+}
+
+// sharedAssetByKey resolves an asset owned by another user. The asset is only
+// served when it is attached to a note the caller can access (e.g. it was
+// shared with them); unattached assets stay owner-only.
+func (s *Server) sharedAssetByKey(ctx context.Context, userID int64, key string) (store.Asset, error) {
+	asset, err := s.store.GetAssetUnscoped(ctx, key)
+	if err != nil {
+		return store.Asset{}, err
+	}
+	if asset.NoteID == 0 {
+		return store.Asset{}, store.ErrNotFound
+	}
+	if _, _, err := s.store.GetNote(ctx, userID, asset.NoteID); err != nil {
+		return store.Asset{}, store.ErrNotFound
+	}
+	return asset, nil
 }
 
 func urlPathSegment(value string) string {

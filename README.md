@@ -14,7 +14,9 @@ built for markdown notes, folders, attachments, search, and private hosting.
 - PGP-encrypted notes and encrypted attachments
 - Note sharing between users on the same instance
 - Templates for daily notes and other repeatable note types
-- Zip import and export backups
+- Zip import and export backups (with full restore)
+- Offline-capable PWA and Android app
+- Browser web-clipper extension
 - Optional OIDC login for existing accounts
 
 ## Run With Docker
@@ -51,6 +53,16 @@ docker run -d \
 With this setting, the UI, API, assets, service worker, cookies, generated
 attachment links, backup links, and client-side note/search routes all live
 under `/cairnfield`.
+
+## Android App
+
+A native Android companion app (a WebView shell with offline support and
+self-updates) is built from this repository. Download
+`cairnfield-android.apk` from the latest
+[GitHub release](https://github.com/grahamsz/cairnfield/releases/latest),
+install it, and enter your server URL. The app checks GitHub releases daily
+and offers to update itself when a new version is tagged. Building and signing
+your own is documented in [docs/android.md](docs/android.md).
 
 ## OIDC Login
 
@@ -109,6 +121,12 @@ When OIDC is configured, cairnfield advertises the provider in the login view.
 After the provider redirects back, cairnfield verifies the ID token, requires a
 verified email address, checks the optional allowlists, then signs in the local
 user whose email matches the OIDC email.
+
+## Documentation
+
+Developer documentation lives in [docs/](docs/README.md): architecture and
+data model, the HTTP API, the frontend, the browser extension, and the
+project's relationship to rolltop.
 
 ## License
 

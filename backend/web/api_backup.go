@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"cairnfield/backend/document"
 	"cairnfield/backend/store"
 )
 
@@ -382,4 +383,180 @@ func safeBackupSegment(value string) string {
 		value = value[:96]
 	}
 	return value
+}
+
+type backupRestoreResult struct {
+	Restored bool `json:"restored"`
+	Notes    int  `json:"notes"`
+	Assets   int  `json:"assets"`
+	Folders  int  `json:"folders"`
+}
+
+// readBackupManifest returns the parsed manifest when the zip is a cairnfield
+// backup archive, i.e. it carries a manifest.json at its root in the shape
+// written by writeBackupZip.
+func readBackupManifest(zr *zip.Reader) (backupManifest, bool) {
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		clean := path.Clean(strings.ReplaceAll(zf.Name, "\\", "/"))
+		if clean != "manifest.json" {
+			continue
+		}
+		data, err := readZipFileData(zf, 8<<20)
+		if err != nil {
+			return backupManifest{}, false
+		}
+		var manifest backupManifest
+		if err := json.Unmarshal(data, &manifest); err != nil || manifest.GeneratedAt.IsZero() {
+			return backupManifest{}, false
+		}
+		for _, note := range manifest.Notes {
+			if note.Slug == "" || note.ZipPath == "" {
+				return backupManifest{}, false
+			}
+		}
+		for _, asset := range manifest.Assets {
+			if asset.Slug == "" || asset.ZipPath == "" {
+				return backupManifest{}, false
+			}
+		}
+		return manifest, true
+	}
+	return backupManifest{}, false
+}
+
+func readZipFileData(zf *zip.File, maxBytes int64) ([]byte, error) {
+	rc, err := zf.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errors.New(zf.Name + " is too large")
+	}
+	return data, nil
+}
+
+// restoreBackupZip imports a backup archive written by writeBackupZip: notes are
+// recreated with their original slug (when still globally free), folder,
+// timestamps and trash state, and assets are re-linked to the recreated notes
+// via the manifest's note_id. Assets whose manifest note_id has no matching
+// note in the archive are skipped. Restore is not idempotent: restoring the
+// same archive twice duplicates the notes.
+func (s *Server) restoreBackupZip(ctx context.Context, userID int64, manifest backupManifest, zr *zip.Reader) (backupRestoreResult, error) {
+	if len(manifest.Assets) > 0 && s.blobs == nil {
+		return backupRestoreResult{}, errors.New("blob storage is not configured")
+	}
+	entries := map[string]*zip.File{}
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		clean := path.Clean(strings.ReplaceAll(zf.Name, "\\", "/"))
+		if clean != "." && !strings.HasPrefix(clean, "../") && !strings.HasPrefix(clean, "/") {
+			entries[strings.ToLower(clean)] = zf
+		}
+	}
+	result := backupRestoreResult{Restored: true}
+	foldersSeen := map[string]bool{}
+	type restoredNote struct {
+		note    store.Note
+		version store.NoteVersion
+		entry   backupManifestNote
+	}
+	restored := map[int64]restoredNote{}
+	for _, entry := range manifest.Notes {
+		zf, ok := entries[strings.ToLower(entry.ZipPath)]
+		if !ok {
+			continue
+		}
+		body, err := readZipFileData(zf, 100<<20)
+		if err != nil {
+			return result, err
+		}
+		folder := normalizeFolderPath(entry.FolderPath)
+		if !foldersSeen[folder] {
+			foldersSeen[folder] = true
+			created, err := s.store.EnsureFolder(ctx, userID, folder)
+			if err != nil {
+				return result, err
+			}
+			if created {
+				result.Folders++
+			}
+		}
+		trashedAt := entry.TrashedAt
+		if trashedAt.IsZero() && strings.HasPrefix(entry.ZipPath, "trash/") {
+			trashedAt = entry.UpdatedAt
+		}
+		note, version, err := s.store.CreateRestoredNote(ctx, userID, entry.Title, folder, string(body), entry.Slug, entry.IsEncrypted, trashedAt, entry.UpdatedAt)
+		if err != nil {
+			return result, err
+		}
+		result.Notes++
+		restored[entry.ID] = restoredNote{note: note, version: version, entry: entry}
+	}
+	renamed := map[string]string{}
+	for _, entry := range manifest.Assets {
+		rn, ok := restored[entry.NoteID]
+		if !ok {
+			continue
+		}
+		zf, ok := entries[strings.ToLower(entry.ZipPath)]
+		if !ok {
+			continue
+		}
+		data, err := readZipFileData(zf, 100<<20)
+		if err != nil {
+			return result, err
+		}
+		saved, err := s.blobs.SaveAsset(userID, entry.Filename, data)
+		if err != nil {
+			return result, err
+		}
+		searchText := ""
+		if !entry.Encrypted {
+			searchText = document.SearchableText(entry.Filename, entry.ContentType, data)
+		}
+		asset, err := s.store.CreateRestoredAsset(ctx, store.Asset{
+			UserID: userID, NoteID: rn.note.ID, VersionID: rn.version.ID, Slug: entry.Slug,
+			Filename: entry.Filename, ContentType: entry.ContentType, BlobPath: saved.Path,
+			SHA256: saved.SHA256, Size: saved.Size, Encrypted: entry.Encrypted,
+			SearchText: searchText, CreatedAt: entry.CreatedAt,
+		})
+		if err != nil {
+			return result, err
+		}
+		result.Assets++
+		if asset.Slug != entry.Slug {
+			renamed[entry.Slug] = asset.Slug
+		}
+	}
+	for oldID, rn := range restored {
+		rewritten := rn.version.Content
+		for oldSlug, newSlug := range renamed {
+			rewritten = strings.ReplaceAll(rewritten, "/assets/"+oldSlug+"/", "/assets/"+newSlug+"/")
+		}
+		if rewritten == rn.version.Content {
+			continue
+		}
+		note, version, err := s.store.ReplaceImportedNoteContentAt(ctx, userID, rn.note.ID, rewritten, rn.entry.UpdatedAt)
+		if err != nil {
+			return result, err
+		}
+		rn.note, rn.version = note, version
+		restored[oldID] = rn
+	}
+	for _, rn := range restored {
+		if rn.note.TrashedAt.IsZero() {
+			s.indexCurrent(ctx, rn.note, rn.version)
+		}
+	}
+	return result, nil
 }

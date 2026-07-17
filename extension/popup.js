@@ -317,7 +317,9 @@ async function captureSelectionImage() {
 }
 
 document.querySelector("#clip-pdf").addEventListener("click", () => void capturePagePDF().catch((err) => setStatus(err.message || String(err), "error")));
+document.querySelector("#clip-html").addEventListener("click", () => void capture("page").catch((err) => setStatus(err.message || String(err), "error")));
 document.querySelector("#clip-selection-image").addEventListener("click", () => void captureSelectionImage().catch((err) => setStatus(err.message || String(err), "error")));
+document.querySelector("#clip-selection").addEventListener("click", () => void capture("selection").catch((err) => setStatus(err.message || String(err), "error")));
 document.querySelector("#options").addEventListener("click", () => chrome.runtime.openOptionsPage());
 
 void load();

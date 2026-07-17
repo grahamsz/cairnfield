@@ -33,7 +33,8 @@ import {
   ShareNetworkIcon,
   SignOutIcon,
   SquaresFourIcon,
-  UsersIcon
+  UsersIcon,
+  XIcon
 } from "@phosphor-icons/react";
 import MarkdownPreview from "@uiw/react-markdown-preview";
 import {
@@ -85,9 +86,11 @@ type SecurityUnlock = { keyID: number; label: string; fingerprint: string; publi
 type EditorSnapshot = { activeNote: Note; version: NoteVersion; title: string; folder: string; content: string; headerJSON: string; encrypted: boolean; plainUnlocked: boolean; securityUnlock: SecurityUnlock | null; defaultKey: EncryptionKey | null; signature: string };
 type DateFormatOption = { value: string; label: string; sample: string };
 type SyncPushResult = { op?: "create" | "update"; client_id?: string; note_id?: number; note?: Note; version?: NoteVersion; conflict?: boolean; error?: string };
+type BeforeInstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }> };
 
 let toastSeq = 1;
 const appLockChannelName = "cairnfield-lock";
+const isNativeAndroid = () => typeof (window as any).cairnfieldAndroid !== "undefined";
 const folderDisplayModes: { value: FolderDisplayMode; label: string }[] = [
   { value: "list", label: "List" },
   { value: "gallery", label: "Gallery" },
@@ -139,6 +142,8 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [offlineMode, setOfflineMode] = useState(!navigator.onLine);
   const [appTheme, setAppTheme] = useState<AppTheme>(() => themeFromValue(window.localStorage.getItem("cairnfield-theme")));
+  const [androidInstallPrompt, setAndroidInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const isAndroidUA = useMemo(() => /\bAndroid\b/i.test(navigator.userAgent || ""), []);
   const decryptedTitleCache = useRef<Map<number, string>>(new Map());
 
   const csrf = bootstrap?.csrf || "";
@@ -153,6 +158,28 @@ export default function App() {
     if (kind !== "loading") window.setTimeout(() => setToasts((items) => items.filter((t) => t.id !== id)), 4200);
     return id;
   }, []);
+
+  useEffect(() => {
+    function beforeInstallPrompt(event: Event) {
+      if (!isAndroidUA) return;
+      event.preventDefault();
+      setAndroidInstallPrompt(event as BeforeInstallPromptEvent);
+    }
+    window.addEventListener("beforeinstallprompt", beforeInstallPrompt);
+    return () => window.removeEventListener("beforeinstallprompt", beforeInstallPrompt);
+  }, [isAndroidUA]);
+
+  async function installAndroidApp() {
+    if (!androidInstallPrompt) {
+      addToast("Use your browser menu to install Cairnfield on Android.", "error");
+      return;
+    }
+    const prompt = androidInstallPrompt;
+    setAndroidInstallPrompt(null);
+    await prompt.prompt();
+    const choice = await prompt.userChoice;
+    if (choice.outcome === "accepted") addToast("Cairnfield install started.");
+  }
 
   const applyOfflineSync = useCallback((data: SyncBootstrap) => {
     const list = (data.notes || []).map(noteSummaryFromSync);
@@ -527,7 +554,7 @@ export default function App() {
     }
   }
 
-  if (!bootstrap) return <AuthShell><div className="panel muted">Loading cairnfield...</div></AuthShell>;
+  if (!bootstrap) return <AuthShell><LoadingStones /><div className="panel muted">Loading cairnfield...</div></AuthShell>;
   if (!bootstrap.users_exist) return <AuthShell><Setup csrf={csrf} onDone={refreshBootstrap} /></AuthShell>;
   if (!user) return <AuthShell><Login csrf={csrf} authProviders={bootstrap.auth_providers || []} onDone={refreshBootstrap} /></AuthShell>;
   const userID = user.id;
@@ -827,17 +854,6 @@ export default function App() {
     }
   }
 
-  async function loadTrash() {
-    try {
-      const data = await api.trash();
-      setNotes(data.notes || []);
-      setFolder("__trash");
-      setView("editor");
-    } catch (err) {
-      addToast(messageFromError(err), "error");
-    }
-  }
-
   async function importFiles(files: File[], targetFolder: string) {
     try {
       if (offlineMode || !navigator.onLine) {
@@ -967,6 +983,7 @@ export default function App() {
             event.preventDefault();
             void trashDraggedNotes(noteIDsFromDragEvent(event));
           }}><TrashIcon />Trash</button>
+          {isAndroidUA && !isNativeAndroid() ? <AndroidInstallCard canPrompt={Boolean(androidInstallPrompt)} onInstall={() => void installAndroidApp().catch((err) => addToast(messageFromError(err), "error"))} /> : null}
         </aside>
         <button type="button" className="sidebar-resizer" aria-label="Resize sidebar" onPointerDown={beginSidebarResize} />
         <main className="content">
@@ -987,6 +1004,31 @@ export default function App() {
 
 function AuthShell({ children }: { children: React.ReactNode }) {
   return <div className="auth-page"><div className="auth-brand"><span className="brand-mark"><img src={appURL("/icon.svg")} alt="" /></span>cairnfield</div>{children}</div>;
+}
+
+function LoadingStones() {
+  return (
+    <svg className="loading-stones" viewBox="0 0 52 52" width="64" height="64" role="img" aria-label="Loading">
+      <g transform="translate(-41.385513,-70.875101)">
+        <g className="loading-stone stone-bottom"><path fill="#2b3448" d="m 48.367239,123.3629 39.503364,0 a 2.8628085,2.8628085 127.69906 0 0 2.770343,-3.58453 l -2.019792,-7.75305 a 5.4243068,5.4243068 41.069622 0 0 -4.612383,-4.01934 l -26.519016,-3.13456 a 5.1984154,5.1984154 151.26908 0 0 -5.290556,2.9002 l -5.92413,12.25627 a 2.3237523,2.3237523 57.898525 0 0 2.09217,3.33501 z" /></g>
+        <g className="loading-stone stone-middle"><path fill="#2b3448" d="m 47.586122,94.818693 -0.643287,2.825946 a 3.4029464,3.4029464 55.397155 0 0 2.846215,4.125391 l 18.541001,2.59594 a 16.180632,16.180632 175.07594 0 0 7.194868,-0.61986 l 3.215548,-1.03353 a 6.1992652,6.1992652 131.3226 0 0 4.199197,-4.776049 l 1.151839,-6.236897 a 2.8210388,2.8210388 47.755926 0 0 -3.017628,-3.32284 l -28.975241,2.510399 a 5.0774254,5.0774254 138.93618 0 0 -4.512512,3.9315 z" /></g>
+        <g className="loading-stone stone-top"><path fill="#c46b44" d="m 55.466971,85.146788 0.951198,-7.518431 a 7.4994774,7.4994774 123.49633 0 1 3.665766,-5.539139 8.2835039,8.2835039 174.8089 0 1 5.346876,-0.485766 l 6.009954,0.80199 a 6.1347681,6.1347681 38.724386 0 1 4.947754,3.967357 l 1.945245,5.300698 a 3.0173964,3.0173964 120.68183 0 1 -2.387496,4.023908 l -17.280595,2.577751 a 2.8067907,2.8067907 44.363113 0 1 -3.198702,-3.128368 z" /></g>
+      </g>
+    </svg>
+  );
+}
+
+function AndroidInstallCard({ canPrompt, onInstall }: { canPrompt: boolean; onInstall: () => void }) {
+  return (
+    <section className="android-install-card">
+      <div className="android-install-mark"><img src={appURL("/icon.svg")} alt="" /></div>
+      <div>
+        <strong>Cairnfield for Android</strong>
+        <small>{canPrompt ? "Install the app on this device." : "Available from your browser menu."}</small>
+      </div>
+      <button type="button" className="secondary" onClick={onInstall}>Install</button>
+    </section>
+  );
 }
 
 function NewNoteMenu({ templates, createNote, encryptedAvailable, securityUnlocked, openUnlock, editTemplate }: { templates: Template[]; createNote: (templateID?: number, encrypted?: boolean) => Promise<void>; encryptedAvailable: boolean; securityUnlocked: boolean; openUnlock: () => void; editTemplate: (templateID: number) => void }) {
@@ -1559,7 +1601,7 @@ function EditorView({ csrf, user, activeNote, version, assets, shares, defaultKe
       {plainUnlocked && !documentAsset && mode === "rich" ? <RichMarkdownEditor key={activeNote.id} content={richContent} restoreAssetMarkdown={restoreAssetMarkdown} setContent={setContent} uploadAssetURL={uploadAssetURL} addToast={addToast} /> : null}
       {plainUnlocked && !documentAsset && mode === "raw" ? <RawMarkdownEditor content={content} setContent={setContent} upload={upload} addToast={addToast} /> : null}
       {plainUnlocked && mode === "history" ? offlineMode || !navigator.onLine ? <div className="panel muted">Version history is unavailable offline.</div> : <History noteID={activeNote.id} currentUser={user} encrypted={activeNote.is_encrypted} securityUnlock={securityUnlock} openUnlock={openUnlock} csrf={csrf} openNote={(id) => api.note(id).then((data) => { setActiveNote(data.note); setVersion(data.version); setShares(data.shares || []); setActiveAssets(data.assets || []); })} addToast={addToast} /> : null}
-      {shareOpen && !activeNote.is_encrypted ? <ShareDialog csrf={csrf} noteID={activeNote.id} shares={shares} setShares={setShares} onClose={() => setShareOpen(false)} addToast={addToast} /> : null}
+      {shareOpen && !activeNote.is_encrypted ? <ShareDialog csrf={csrf} noteID={activeNote.id} shares={shares} setShares={setShares} isOwner={activeNote.owner_user_id === user.id} onClose={() => setShareOpen(false)} addToast={addToast} /> : null}
     </section>
   );
 }
@@ -2350,7 +2392,7 @@ function History({ noteID, currentUser, encrypted, securityUnlock, openUnlock, c
   );
 }
 
-function ShareDialog({ csrf, noteID, shares, setShares, onClose, addToast }: { csrf: string; noteID: number; shares: Share[]; setShares: (shares: Share[]) => void; onClose: () => void; addToast: (message: string, kind?: Toast["kind"]) => number }) {
+function ShareDialog({ csrf, noteID, shares, setShares, isOwner, onClose, addToast }: { csrf: string; noteID: number; shares: Share[]; setShares: (shares: Share[]) => void; isOwner: boolean; onClose: () => void; addToast: (message: string, kind?: Toast["kind"]) => number }) {
   const [users, setUsers] = useState<User[]>([]);
   const [selectedUserID, setSelectedUserID] = useState(0);
   const [permission, setPermission] = useState<"read" | "write">("read");
@@ -2369,6 +2411,10 @@ function ShareDialog({ csrf, noteID, shares, setShares, onClose, addToast }: { c
     event.preventDefault();
     if (!selectedUser) return;
     void api.share(csrf, noteID, { email: selectedUser.email, permission }).then(() => api.note(noteID)).then((data) => { setShares(data.shares || []); addToast("Share saved."); }).catch((err) => addToast(messageFromError(err), "error"));
+  }
+
+  function removeShare(userID: number) {
+    void api.removeShare(csrf, noteID, userID).then(() => api.note(noteID)).then((data) => { setShares(data.shares || []); addToast("Share removed."); }).catch((err) => addToast(messageFromError(err), "error"));
   }
 
   return (
@@ -2407,7 +2453,10 @@ function ShareDialog({ csrf, noteID, shares, setShares, onClose, addToast }: { c
             {shares.map((share) => (
               <div className="version-row" key={share.shared_user_id}>
                 <span>{share.name || share.email}<small>{share.email}</small></span>
-                <strong>{share.permission}</strong>
+                <span className="share-row-actions">
+                  <strong>{share.permission}</strong>
+                  {isOwner ? <button type="button" className="icon-only secondary" title="Remove share" aria-label="Remove share" onClick={() => removeShare(share.shared_user_id)}><XIcon /></button> : null}
+                </span>
               </div>
             ))}
           </div>
@@ -2903,11 +2952,6 @@ function isInFolderTree(notePath: string, folderPath: string) {
   return folder === "/" || noteFolder === folder || noteFolder.startsWith(`${folder}/`);
 }
 
-function currentFolderMode(folders: FolderRecord[], path: string): FolderDisplayMode {
-  if (path === "__trash" || path === "__starred") return "list";
-  return (folders || []).find((folder) => normalizeFolderPath(folder.path) === normalizeFolderPath(path || "/"))?.display_mode || "list";
-}
-
 function sortNoteSummaries(notes: NoteSummary[], sortMode: FolderSortMode) {
   const list = [...(notes || [])];
   switch (sortMode) {
@@ -3003,12 +3047,6 @@ function saveLabel(status: "idle" | "dirty" | "saving" | "saved" | "offline") {
     case "offline": return "Offline queue";
     default: return "";
   }
-}
-
-function formatDate(value: string) {
-  const time = Date.parse(value || "");
-  if (!Number.isFinite(time)) return "";
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(time);
 }
 
 function formatSidebarDate(value: string, dateFormat: string) {
@@ -3239,10 +3277,6 @@ function SidebarNoteIcon({ note }: { note: NoteSummary }) {
   if (type.startsWith("image/")) return <ImageIcon className="document-note-icon" />;
   if (type === "application/pdf") return <FilePdfIcon className="document-note-icon" />;
   return <FileTextIcon className="document-note-icon" />;
-}
-
-function noteDocumentContentType(headerJSON: string) {
-  return noteDocumentInfo(headerJSON).contentType;
 }
 
 function noteDocumentInfo(headerJSON: string) {
