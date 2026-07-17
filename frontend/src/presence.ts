@@ -2,8 +2,12 @@ import { appURL } from "./base";
 
 export type PresenceParticipant = { user_id: number; name: string; email: string; same_user: boolean; editing: boolean; sessions: number };
 export type PresenceMessage = { type: "presence"; note_id: number; participants: PresenceParticipant[] };
-export type NoteSavedMessage = { type: "note_saved"; note_id: number; version_id: number; title: string; by_user_id: number; by_name: string; by_email: string; saved_at: number };
+export type NoteSavedMessage = { type: "note_saved"; note_id: number; version_id: number; title: string; by_user_id: number; by_name: string; by_email: string; saved_at: number; content_sha256: string; editor_id: string };
 export type PresenceServerMessage = PresenceMessage | NoteSavedMessage;
+
+// Per-tab identifier sent with note saves; the server echoes it in note_saved
+// broadcasts so this tab can skip its own save notifications.
+export const editorID = crypto.randomUUID();
 
 type PresenceHandler = (message: PresenceMessage) => void;
 type NoteSavedHandler = (message: NoteSavedMessage) => void;

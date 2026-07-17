@@ -59,7 +59,7 @@ Enabled only when `CAIRNFIELD_OIDC_*` is configured; advertised via
 | `GET /api/notes` | auth | Query: `folder`, `page`, `trash=1`, `starred=1`, `descendants=1`. Paginated summaries. |
 | `POST /api/notes` | auth | Create `{template_id?, selected_folder?}`. Returns `reused: true` when a `create_once` template matched an existing note. |
 | `GET /api/notes/{key}` | auth | Note + current version + shares + assets. |
-| `PUT /api/notes/{key}` | auth (write) | Save `{title, folder_path, content, header_json, base_version_id, client_id, is_encrypted, autosave}`. Returns `conflict: true` if `base_version_id` was stale (saved as a conflicted version). |
+| `PUT /api/notes/{key}` | auth (write) | Save `{title, folder_path, content, header_json, base_version_id, client_id, is_encrypted, autosave, editor_id?}`. Returns `conflict: true` if `base_version_id` was stale (saved as a conflicted version). `editor_id` is echoed in the `note_saved` WS broadcast so the saving tab can skip it. |
 | `POST /api/notes/{key}/folder` | auth | Move to `{folder_path}` (per-user placement for shared notes). |
 | `GET /api/notes/{key}/versions` | auth | Full version history with author labels. |
 | `POST /api/notes/{key}/restore` | auth (write) | Point `current_version_id` at `{version_id}`. |
@@ -141,7 +141,7 @@ Server → client:
 
 ```json
 {"type":"presence","note_id":123,"participants":[{"user_id":2,"name":"Bob","email":"b@x","same_user":false,"editing":true,"sessions":1}]}
-{"type":"note_saved","note_id":123,"version_id":456,"title":"T","by_user_id":2,"by_name":"Bob","by_email":"b@x","saved_at":1721320000}
+{"type":"note_saved","note_id":123,"version_id":456,"title":"T","by_user_id":2,"by_name":"Bob","by_email":"b@x","saved_at":1721320000,"content_sha256":"ab12…","editor_id":"uuid-per-tab"}
 {"type":"error","message":"note not accessible"}
 ```
 
@@ -151,7 +151,10 @@ Server → client:
   count. `editing` is OR-ed across a user's connections.
 - `note_saved` is broadcast to all watchers of the note (including the
   saver's connections) after a successful non-conflict save or version
-  restore.
+  restore. `content_sha256` is the saved body's hash — autosave coalescing
+  keeps `version_id` stable, so receivers compare hashes to detect real
+  changes. `editor_id` echoes the optional per-tab `editor_id` field accepted
+  by `PUT /api/notes/{key}`, letting the saving tab skip its own echo.
 - Watching requires note access (owner or share recipient); inaccessible
   notes are rejected with an `error` message.
 - The server pings every 30s; message read limit is 4 KB.

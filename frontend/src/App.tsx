@@ -70,7 +70,7 @@ import { api, messageFromError } from "./api";
 import { appPathname, appURL } from "./base";
 import { decryptBytes, decryptText, downloadKey, encryptBytes, encryptText, generateKey, passphraseIssues, privateKeyMetadata, verifyPrivateKey } from "./crypto";
 import { deleteOfflineNote, loadBrowserPGPKey, loadOfflineBootstrap, loadOfflineSync, noteSummaryFromSync, offlineNote, pendingEdits, queueEdit, removePendingEdits, replaceOfflineFolders, saveBrowserPGPKey, saveOfflineBootstrap, saveOfflineSync, upsertOfflineFolder, upsertOfflineNote, type PendingOperation } from "./offline";
-import { presenceClient, type PresenceParticipant } from "./presence";
+import { presenceClient, editorID, type PresenceParticipant } from "./presence";
 import type { APIToken, Asset, AuthProvider, BackupExport, Bootstrap, EncryptionKey, FolderRecord, MoodboardItem, Note, NoteDetail, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerURL;
@@ -147,9 +147,8 @@ export default function App() {
   const isAndroidUA = useMemo(() => /\bAndroid\b/i.test(navigator.userAgent || ""), []);
   const decryptedTitleCache = useRef<Map<number, string>>(new Map());
   const presenceDirtyRef = useRef(false);
-  const watchedNoteIDRef = useRef(0);
   const versionRef = useRef<NoteVersion | null>(null);
-  const knownVersionIDsRef = useRef<Set<number>>(new Set());
+  const versionShaRef = useRef("");
 
   const csrf = bootstrap?.csrf || "";
   const user = bootstrap?.user || null;
@@ -334,14 +333,12 @@ export default function App() {
 
   useEffect(() => {
     versionRef.current = version;
-    if (version) knownVersionIDsRef.current.add(version.id);
+    versionShaRef.current = version?.body_sha256 || "";
   }, [version]);
 
   useEffect(() => {
     const noteID = activeNote?.id || 0;
     presenceDirtyRef.current = false;
-    watchedNoteIDRef.current = noteID;
-    knownVersionIDsRef.current = new Set(versionRef.current ? [versionRef.current.id] : []);
     setPresence([]);
     if (!noteID || !user) return;
     const offPresence = presenceClient.onPresence((message) => {
@@ -349,25 +346,23 @@ export default function App() {
     });
     const offSaved = presenceClient.onNoteSaved((message) => {
       if (message.note_id !== noteID) return;
-      // The server echoes this tab's own saves too, and the broadcast can beat
-      // the save response, so re-check known versions after a short delay.
-      window.setTimeout(() => {
-        if (watchedNoteIDRef.current !== noteID || knownVersionIDsRef.current.has(message.version_id)) return;
-        const name = message.by_name || "Someone";
-        if (presenceDirtyRef.current) {
-          addToast(`${name} saved changes to this note — your next save may conflict.`, "warning");
-          return;
-        }
-        void openNote(noteID, "none");
-        addToast(`${name} updated this note.`);
-      }, 400);
+      // Our own saves echo back with this tab's editor_id; skip them. Autosave
+      // coalescing keeps version_id stable, so compare content hashes instead.
+      if (message.editor_id === editorID) return;
+      if (message.content_sha256 && message.content_sha256 === versionShaRef.current) return;
+      const name = message.by_name || "Someone";
+      if (presenceDirtyRef.current) {
+        addToast(`${name} saved changes to this note — your next save may conflict.`, "warning");
+        return;
+      }
+      void openNote(noteID, "none");
+      addToast(`${name} updated this note.`);
     });
     presenceClient.watch(noteID, false);
     return () => {
       offPresence();
       offSaved();
       presenceClient.unwatch(noteID);
-      if (watchedNoteIDRef.current === noteID) watchedNoteIDRef.current = 0;
       setPresence([]);
     };
   }, [activeNote?.id, addToast, openNote, user]);
@@ -377,6 +372,10 @@ export default function App() {
     const noteID = activeNote?.id || 0;
     if (noteID) presenceClient.watch(noteID, dirty);
   }, [activeNote?.id]);
+
+  const rememberDecryptedTitle = useCallback((id: number, title: string) => {
+    decryptedTitleCache.current.set(id, title);
+  }, []);
 
   const executeSearch = useCallback(async (searchQuery: string, historyMode: "push" | "replace" | "none" = "push", page = 1) => {
     const trimmed = searchQuery.trim();
@@ -1021,7 +1020,7 @@ export default function App() {
             view === "search" ? <NoteListView csrf={csrf} title="Search" subtitle={`${searchResults.length.toLocaleString()} result${searchResults.length === 1 ? "" : "s"} on page ${searchPage} for ${query}${offlineMode ? " - Offline search is limited" : ""}`} results={searchResults} setResults={setSearchResults} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} highlight={query} addToast={addToast} page={searchPage} hasMore={searchHasMore} onPageChange={(page) => executeSearch(query, "push", page)} offlineMode={offlineMode} /> :
             view === "folder" && (folderViewMode === "gallery" || folderViewMode === "moodboard") && folder !== "__trash" && folder !== "__starred" ? <MoodboardView folder={folder} mode={folderViewMode} sortMode={activeFolderSortMode} controls={folderControls} items={moodboardItems} setItems={setMoodboardItems} csrf={csrf} openNote={openNote} importFiles={importFiles} setFolderSortMode={setFolderSortMode} addToast={addToast} /> :
             view === "folder" ? <NoteListView csrf={csrf} title={folderTitle(folder)} subtitle={`${folderNotes.length.toLocaleString()} note${folderNotes.length === 1 ? "" : "s"} on page ${folderPage}, ${folderSortLabel(activeFolderSortMode).toLowerCase()} first`} results={folderNotes} setResults={setFolderNotes} selected={selectedNoteIDs} setSelected={setSelectedNoteIDs} openNote={openNote} securityUnlocked={Boolean(unlocked)} addToast={addToast} page={folderPage} hasMore={folderHasMore} onPageChange={(page) => openFolder(folder, page)} action={folder === "__trash" ? <button type="button" className="secondary danger-action" disabled={folderNotes.length === 0} onClick={() => void emptyTrash()}><TrashIcon />Empty trash</button> : folderControls} /> :
-            <EditorView csrf={csrf} user={user} activeNote={activeNote} version={version} assets={activeAssets} shares={shares} defaultKey={defaultKey} securityUnlock={unlocked} openUnlock={() => setSecurityUnlockOpen(true)} rememberDecryptedTitle={(id, title) => decryptedTitleCache.current.set(id, title)} setActiveNote={setActiveNote} setVersion={setVersion} setShares={setShares} setActiveAssets={setActiveAssets} setNotes={setNotes} reloadNotes={loadNotes} addToast={addToast} offlineMode={offlineMode} presence={presence} onDirtyChange={handleDirtyChange} />}
+            <EditorView csrf={csrf} user={user} activeNote={activeNote} version={version} assets={activeAssets} shares={shares} defaultKey={defaultKey} securityUnlock={unlocked} openUnlock={() => setSecurityUnlockOpen(true)} rememberDecryptedTitle={rememberDecryptedTitle} setActiveNote={setActiveNote} setVersion={setVersion} setShares={setShares} setActiveAssets={setActiveAssets} setNotes={setNotes} reloadNotes={loadNotes} addToast={addToast} offlineMode={offlineMode} presence={presence} onDirtyChange={handleDirtyChange} />}
         </main>
       </div>
       {importRequest ? <ImportApprovalDialog request={importRequest} onCancel={() => setImportRequest(null)} onApprove={() => { const req = importRequest; setImportRequest(null); void importFiles(req.files, req.folderPath); }} /> : null}
@@ -1327,7 +1326,7 @@ function EditorView({ csrf, user, activeNote, version, assets, shares, defaultKe
       saveTitle = await encryptText(snap.title || "Untitled", encryptionKey);
       saveContent = await encryptText(snap.content || "", encryptionKey);
     }
-    const edit = { note_id: snap.activeNote.id, base_version_id: snap.version.id, title: saveTitle, folder_path: snap.folder, content: saveContent, header_json: snap.headerJSON || "{}", client_id: crypto.randomUUID(), is_encrypted: snap.encrypted, autosave: cause === "auto" };
+    const edit = { note_id: snap.activeNote.id, base_version_id: snap.version.id, title: saveTitle, folder_path: snap.folder, content: saveContent, header_json: snap.headerJSON || "{}", client_id: crypto.randomUUID(), is_encrypted: snap.encrypted, autosave: cause === "auto", editor_id: editorID };
     if (!navigator.onLine) {
       await queueEdit(edit);
       const cachedNote = { ...snap.activeNote, title: saveTitle, folder_path: snap.folder, updated_at: new Date().toISOString() };

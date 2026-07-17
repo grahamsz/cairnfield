@@ -179,8 +179,11 @@ next to the save-state chip: "…is editing now" (warning) when another session
 or user is actively editing the same note, "Open in another tab" / "…is
 viewing" otherwise. When a `note_saved` broadcast arrives for the open note,
 the app either quietly reloads it (clean editor + toast "{name} updated this
-note") or warns that the next save may conflict (dirty editor). A short echo
-guard suppresses notifications for this tab's own saves.
+note") or warns that the next save may conflict (dirty editor). Echoes of the
+tab's own saves are skipped deterministically: every save carries a per-tab
+`editor_id` that the broadcast reflects, and content changes are detected by
+comparing `content_sha256` against the loaded version's `body_sha256` (so
+coalesced autosaves, which keep the version id, still register).
 
 ## Known loose ends
 

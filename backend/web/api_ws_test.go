@@ -27,16 +27,18 @@ type wsTestParticipant struct {
 }
 
 type wsTestMessage struct {
-	Type         string              `json:"type"`
-	NoteID       int64               `json:"note_id"`
-	Message      string              `json:"message"`
-	Participants []wsTestParticipant `json:"participants"`
-	VersionID    int64               `json:"version_id"`
-	Title        string              `json:"title"`
-	ByUserID     int64               `json:"by_user_id"`
-	ByName       string              `json:"by_name"`
-	ByEmail      string              `json:"by_email"`
-	SavedAt      int64               `json:"saved_at"`
+	Type          string              `json:"type"`
+	NoteID        int64               `json:"note_id"`
+	Message       string              `json:"message"`
+	Participants  []wsTestParticipant `json:"participants"`
+	VersionID     int64               `json:"version_id"`
+	Title         string              `json:"title"`
+	ByUserID      int64               `json:"by_user_id"`
+	ByName        string              `json:"by_name"`
+	ByEmail       string              `json:"by_email"`
+	SavedAt       int64               `json:"saved_at"`
+	ContentSHA256 string              `json:"content_sha256"`
+	EditorID      string              `json:"editor_id"`
 }
 
 func wsTestServer(t *testing.T) (*store.Store, *Server, *httptest.Server) {
@@ -289,7 +291,7 @@ func TestWSNoteSavedBroadcast(t *testing.T) {
 	})
 
 	// The friend saves the note through the HTTP API.
-	body := `{"title":"Updated Title","folder_path":"/","content":"new body","base_version_id":` + strconv.FormatInt(version.ID, 10) + `,"autosave":false}`
+	body := `{"title":"Updated Title","folder_path":"/","content":"new body","base_version_id":` + strconv.FormatInt(version.ID, 10) + `,"autosave":false,"editor_id":"tab-friend"}`
 	req := httptest.NewRequest(http.MethodPut, "/api/notes/"+strconv.FormatInt(note.ID, 10), strings.NewReader(body))
 	req = req.WithContext(context.WithValue(req.Context(), currentUserKey, currentUser{User: friend}))
 	res := httptest.NewRecorder()
@@ -323,6 +325,12 @@ func TestWSNoteSavedBroadcast(t *testing.T) {
 		}
 		if msg.SavedAt <= 0 {
 			t.Fatalf("saved_at = %d", msg.SavedAt)
+		}
+		if msg.ContentSHA256 == "" || msg.ContentSHA256 != saved.Version.BodySHA256 {
+			t.Fatalf("content_sha256 = %q, want %q", msg.ContentSHA256, saved.Version.BodySHA256)
+		}
+		if msg.EditorID != "tab-friend" {
+			t.Fatalf("editor_id = %q, want tab-friend", msg.EditorID)
 		}
 	}
 }

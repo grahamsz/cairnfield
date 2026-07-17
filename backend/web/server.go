@@ -727,6 +727,7 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 				ClientID      string `json:"client_id"`
 				Encrypted     bool   `json:"is_encrypted"`
 				Autosave      bool   `json:"autosave"`
+				EditorID      string `json:"editor_id"`
 			}
 			if !decodeJSON(w, r, &body) {
 				return
@@ -738,7 +739,7 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 			}
 			if !conflict {
 				s.indexCurrent(r.Context(), note, version)
-				s.wsHub.broadcastNoteSaved(note.ID, version.ID, note.Title, cu.User, noteSavedAt(version))
+				s.wsHub.broadcastNoteSaved(note.ID, version.ID, note.Title, cu.User, noteSavedAt(version), version.BodySHA256, body.EditorID)
 			}
 			writeJSON(w, map[string]any{"note": note, "version": version, "conflict": conflict})
 		default:
@@ -854,7 +855,7 @@ func (s *Server) apiNotePath(w http.ResponseWriter, r *http.Request, path string
 			writeStoreError(w, err)
 			return
 		}
-		s.wsHub.broadcastNoteSaved(note.ID, version.ID, note.Title, cu.User, noteSavedAt(version))
+		s.wsHub.broadcastNoteSaved(note.ID, version.ID, note.Title, cu.User, noteSavedAt(version), version.BodySHA256, "")
 		writeJSON(w, map[string]any{"note": note, "version": version})
 	case "star":
 		if id == 0 {

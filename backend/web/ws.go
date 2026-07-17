@@ -47,14 +47,16 @@ type wsPresenceMessage struct {
 }
 
 type wsNoteSavedMessage struct {
-	Type      string `json:"type"`
-	NoteID    int64  `json:"note_id"`
-	VersionID int64  `json:"version_id"`
-	Title     string `json:"title"`
-	ByUserID  int64  `json:"by_user_id"`
-	ByName    string `json:"by_name"`
-	ByEmail   string `json:"by_email"`
-	SavedAt   int64  `json:"saved_at"`
+	Type          string `json:"type"`
+	NoteID        int64  `json:"note_id"`
+	VersionID     int64  `json:"version_id"`
+	Title         string `json:"title"`
+	ByUserID      int64  `json:"by_user_id"`
+	ByName        string `json:"by_name"`
+	ByEmail       string `json:"by_email"`
+	SavedAt       int64  `json:"saved_at"`
+	ContentSHA256 string `json:"content_sha256"`
+	EditorID      string `json:"editor_id"`
 }
 
 type wsErrorMessage struct {
@@ -198,17 +200,22 @@ func (h *wsHub) broadcastPresence(noteID int64) {
 }
 
 // broadcastNoteSaved notifies all watchers of the note (including the saver's
-// own connections) that a save succeeded.
-func (h *wsHub) broadcastNoteSaved(noteID, versionID int64, title string, by store.User, savedAt time.Time) {
+// own connections) that a save succeeded. contentSHA256 lets receivers tell
+// real content changes apart (autosave coalescing keeps version_id stable);
+// editorID echoes the saver's per-tab identifier so the saving tab can skip
+// its own echo deterministically.
+func (h *wsHub) broadcastNoteSaved(noteID, versionID int64, title string, by store.User, savedAt time.Time, contentSHA256, editorID string) {
 	data, err := json.Marshal(wsNoteSavedMessage{
-		Type:      "note_saved",
-		NoteID:    noteID,
-		VersionID: versionID,
-		Title:     title,
-		ByUserID:  by.ID,
-		ByName:    by.Name,
-		ByEmail:   by.Email,
-		SavedAt:   savedAt.Unix(),
+		Type:          "note_saved",
+		NoteID:        noteID,
+		VersionID:     versionID,
+		Title:         title,
+		ByUserID:      by.ID,
+		ByName:        by.Name,
+		ByEmail:       by.Email,
+		SavedAt:       savedAt.Unix(),
+		ContentSHA256: contentSHA256,
+		EditorID:      editorID,
 	})
 	if err != nil {
 		return
