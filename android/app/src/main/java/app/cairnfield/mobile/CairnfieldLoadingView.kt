@@ -12,9 +12,9 @@ import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.DecelerateInterpolator
 import android.view.animation.Interpolator
 import android.view.animation.LinearInterpolator
-import android.view.animation.OvershootInterpolator
 import androidx.core.graphics.PathParser
 import kotlin.math.min
 import kotlin.math.sin
@@ -36,7 +36,9 @@ class CairnfieldLoadingView @JvmOverloads constructor(
     private val bottomPath = stonePath(STONE_BOTTOM)
     private val middlePath = stonePath(STONE_MIDDLE)
     private val topPath = stonePath(STONE_TOP)
-    private val dropEase: Interpolator = OvershootInterpolator(DROP_OVERSHOOT)
+    // DecelerateInterpolator is monotonic on [0,1], so each stone eases into
+    // its resting position from above without ever dipping below it.
+    private val dropEase: Interpolator = DecelerateInterpolator()
     private val linear: Interpolator = LinearInterpolator()
 
     private val rockPivotX: Float
@@ -245,7 +247,6 @@ class CairnfieldLoadingView @JvmOverloads constructor(
         private const val ROCK_END = 0.92f
         private const val ROCK_AMPLITUDE_DEG = 4.5f
         private const val ROCK_CYCLES = 2f
-        private const val DROP_OVERSHOOT = 1.6f
 
         private const val PULSE_AMPLITUDE = 0.018f
         private const val PULSE_DURATION_MS = 2_600L

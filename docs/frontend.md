@@ -163,10 +163,28 @@ The Android app renders the same animation natively — see
 ## Native Android bridge
 
 When the app runs inside the companion Android WebView app, the page sees
-`window.cairnfieldAndroid = { versionName, versionCode }` (injected before
-page scripts run). The `isNativeAndroid()` helper in `App.tsx` gates
-Android-only web UI on it — currently it just hides the sidebar card offering
-the native APK download, which is pointless inside the native app.
+`window.cairnfieldAndroid` (a synchronous `JavascriptInterface` plus an early
+injected stub). The `isNativeAndroid()` helper in `App.tsx` gates Android-only
+web UI on it — currently it just hides the sidebar card offering the native
+APK download, which is pointless inside the native app. The bridge also
+exposes `getSharedFilesManifest(shareId)` / `releaseShare(shareId)` for
+incoming shares.
+
+### Incoming shares
+
+`nativeShare.ts` + the `IncomingShareDialog` implement the web half of
+Android's share sheet (see [android.md](android.md#share-targets-action_send)):
+
+- `?share_text=…&share_subject=…` — a shared text/link opens the dialog with
+  a title input, folder picker (moodboard folders marked "(board)"), and text
+  preview; saving creates a note (bare URLs become a markdown link).
+- `?android_share=<sessionId>` — shared files: the dialog loads the manifest
+  through the bridge, downloads the bytes from same-origin
+  `/cairnfield-native-share/<session>/<token>` URLs, previews them, and saves
+  each file through `POST /api/import` into the chosen folder.
+
+Both params are captured once on app load and stripped from the URL
+immediately; file sessions are released after the bytes are fetched.
 
 ## Live presence
 

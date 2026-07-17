@@ -71,6 +71,7 @@ import { appPathname, appURL } from "./base";
 import { decryptBytes, decryptText, downloadKey, encryptBytes, encryptText, generateKey, passphraseIssues, privateKeyMetadata, verifyPrivateKey } from "./crypto";
 import { deleteOfflineNote, loadBrowserPGPKey, loadOfflineBootstrap, loadOfflineSync, noteSummaryFromSync, offlineNote, pendingEdits, queueEdit, removePendingEdits, replaceOfflineFolders, saveBrowserPGPKey, saveOfflineBootstrap, saveOfflineSync, upsertOfflineFolder, upsertOfflineNote, type PendingOperation } from "./offline";
 import { presenceClient, editorID, type PresenceParticipant } from "./presence";
+import { loadSharedFiles, nativeShareAvailable } from "./nativeShare";
 import type { APIToken, Asset, AuthProvider, BackupExport, Bootstrap, EncryptionKey, FolderRecord, MoodboardItem, Note, NoteDetail, NoteSummary, NoteVersion, Share, SyncBootstrap, Template, User } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerURL;
@@ -84,6 +85,7 @@ type FolderDisplayMode = "list" | "gallery" | "moodboard";
 type FolderSortMode = "newest" | "oldest" | "alphabetical" | "custom";
 type FolderNode = { path: string; name: string; children: FolderNode[]; notes: NoteSummary[]; noteCount: number };
 type ImportRequest = { files: File[]; folderPath: string };
+type ShareRequest = { kind: "text"; text: string; subject: string } | { kind: "files"; files: File[] };
 type SecurityUnlock = { keyID: number; label: string; fingerprint: string; publicKeyArmored: string; privateKeyArmored: string; passphrase: string; unlockedUntil: number };
 type EditorSnapshot = { activeNote: Note; version: NoteVersion; title: string; folder: string; content: string; headerJSON: string; encrypted: boolean; plainUnlocked: boolean; securityUnlock: SecurityUnlock | null; defaultKey: EncryptionKey | null; signature: string };
 type DateFormatOption = { value: string; label: string; sample: string };
@@ -139,6 +141,7 @@ export default function App() {
   const [templateEditID, setTemplateEditID] = useState(0);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set(["/"]));
   const [importRequest, setImportRequest] = useState<ImportRequest | null>(null);
+  const [shareRequest, setShareRequest] = useState<ShareRequest | null>(null);
   const [securityUnlock, setSecurityUnlock] = useState<SecurityUnlock | null>(null);
   const [securityUnlockOpen, setSecurityUnlockOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -147,6 +150,7 @@ export default function App() {
   const isAndroidUA = useMemo(() => /\bAndroid\b/i.test(navigator.userAgent || ""), []);
   const decryptedTitleCache = useRef<Map<number, string>>(new Map());
   const presenceDirtyRef = useRef(false);
+  const shareHandledRef = useRef(false);
   const versionRef = useRef<NoteVersion | null>(null);
   const versionShaRef = useRef("");
 
@@ -454,6 +458,32 @@ export default function App() {
   useEffect(() => {
     void loadFolders().catch((err) => addToast(messageFromError(err), "error"));
   }, [addToast, loadFolders]);
+
+  useEffect(() => {
+    if (!user || shareHandledRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const shareText = params.get("share_text") || "";
+    const shareSubject = params.get("share_subject") || "";
+    const androidShare = params.get("android_share") || "";
+    if (!shareText && !androidShare) return;
+    shareHandledRef.current = true;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("share_text");
+    url.searchParams.delete("share_subject");
+    url.searchParams.delete("android_share");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    if (shareText) {
+      setShareRequest({ kind: "text", text: shareText, subject: shareSubject });
+      return;
+    }
+    if (!nativeShareAvailable()) {
+      addToast("Shared files can only be received in the cairnfield Android app.", "error");
+      return;
+    }
+    void loadSharedFiles(androidShare)
+      .then((files) => setShareRequest({ kind: "files", files }))
+      .catch((err) => addToast(messageFromError(err), "error"));
+  }, [addToast, user]);
 
   useEffect(() => {
     void refreshKeys().catch(() => undefined);
@@ -907,6 +937,63 @@ export default function App() {
     }
   }
 
+  async function saveShare(title: string, targetFolder: string) {
+    const request = shareRequest;
+    if (!request) return;
+    if (offlineMode || !navigator.onLine) {
+      addToast("Sharing is unavailable offline.", "error");
+      return;
+    }
+    if (request.kind === "text") await saveTextShare(request, title, targetFolder);
+    else await saveFileShare(request, targetFolder);
+  }
+
+  async function saveTextShare(request: { text: string; subject: string }, title: string, targetFolder: string) {
+    try {
+      const trimmed = request.text.trim();
+      const noteTitle = title.trim() || request.subject.trim() || "Shared note";
+      const content = /^https?:\/\//i.test(trimmed) ? `[${request.subject.trim() || trimmed}](${trimmed})\n\n${request.text}` : request.text;
+      const data = await api.createNote(csrf, 0, targetFolder);
+      const saved = await api.saveNote(csrf, data.note.id, {
+        title: noteTitle,
+        folder_path: data.note.folder_path || targetFolder,
+        content,
+        header_json: data.version.header_json || "{}",
+        base_version_id: data.version.id,
+        client_id: crypto.randomUUID(),
+        is_encrypted: false
+      });
+      setNotes((items) => [{ ...saved.note, preview: saved.version.content }, ...(items || [])]);
+      await upsertOfflineNote(saved.note, saved.version);
+      setFolders((items) => upsertFolder(items, { id: 0, user_id: userID, path: saved.note.folder_path, created_at: saved.note.created_at, updated_at: saved.note.updated_at }));
+      setShareRequest(null);
+      await openNote(saved.note.id);
+      addToast("Shared note created.");
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  }
+
+  async function saveFileShare(request: { files: File[] }, targetFolder: string) {
+    try {
+      let count = 0;
+      let firstNote: Note | null = null;
+      for (const file of request.files) {
+        const result = await api.importNotes(csrf, file, targetFolder);
+        count += 1;
+        if (!firstNote && result.notes?.length) firstNote = result.notes[0];
+      }
+      addToast(`Imported ${count} file${count === 1 ? "" : "s"}.`);
+      setShareRequest(null);
+      await loadNotes();
+      await loadFolders();
+      if (firstNote) await openNote(firstNote.id);
+      else await openFolder(targetFolder === "/" ? "" : targetFolder);
+    } catch (err) {
+      addToast(messageFromError(err), "error");
+    }
+  }
+
   async function logout() {
     await api.logout(csrf);
     decryptedTitleCache.current.clear();
@@ -1024,6 +1111,7 @@ export default function App() {
         </main>
       </div>
       {importRequest ? <ImportApprovalDialog request={importRequest} onCancel={() => setImportRequest(null)} onApprove={() => { const req = importRequest; setImportRequest(null); void importFiles(req.files, req.folderPath); }} /> : null}
+      {shareRequest ? <IncomingShareDialog request={shareRequest} folders={folders} onCancel={() => setShareRequest(null)} onSave={saveShare} /> : null}
       {securityUnlockOpen ? <PGPUnlockDialog keys={keys} onClose={() => setSecurityUnlockOpen(false)} onUnlocked={(state) => { setSecurityUnlock(state); setSecurityUnlockOpen(false); addToast("PGP key unlocked."); }} addToast={addToast} /> : null}
       <ToastStack toasts={toasts} onDismiss={(id) => setToasts((items) => items.filter((t) => t.id !== id))} />
     </>
@@ -1123,6 +1211,58 @@ function ImportApprovalDialog({ request, onCancel, onApprove }: { request: Impor
         {zipCount > 0 ? <div className="notice subtle">Zip archives with markdown files import those notes and preserve archive folders. Archives without markdown become one document note per file.</div> : null}
         <div className="import-file-list">{request.files.map((file) => <span key={`${file.name}-${file.size}`}><UploadSimpleIcon />{file.name}</span>)}</div>
         <div className="modal-actions"><button type="button" className="secondary" onClick={onCancel}>Cancel</button><button type="button" onClick={onApprove}>Import</button></div>
+      </div>
+    </div>
+  );
+}
+
+function IncomingShareDialog({ request, folders, onCancel, onSave }: { request: ShareRequest; folders: FolderRecord[]; onCancel: () => void; onSave: (title: string, folderPath: string) => Promise<void> }) {
+  const defaultTitle = useMemo(() => {
+    if (request.kind === "text") return request.subject.trim() || request.text.trim().slice(0, 60);
+    return request.files[0]?.name || "Shared files";
+  }, [request]);
+  const [title, setTitle] = useState(defaultTitle);
+  const [folderPath, setFolderPath] = useState("/");
+  const [saving, setSaving] = useState(false);
+  const folderOptions = useMemo(() => {
+    const paths = (folders || []).map((folder) => ({ path: normalizeFolderPath(folder.path), board: folder.display_mode === "moodboard" }));
+    const unique = paths.filter((item, index) => paths.findIndex((other) => other.path === item.path) === index && item.path !== "/");
+    return unique.sort((a, b) => a.path.localeCompare(b.path));
+  }, [folders]);
+  const thumbnails = useMemo(() => {
+    const map = new Map<string, string>();
+    if (request.kind === "files") {
+      for (const file of request.files) {
+        if (file.type.startsWith("image/")) map.set(`${file.name}-${file.size}`, URL.createObjectURL(file));
+      }
+    }
+    return map;
+  }, [request]);
+  useEffect(() => () => {
+    thumbnails.forEach((url) => URL.revokeObjectURL(url));
+  }, [thumbnails]);
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="security-dialog" role="dialog" aria-label="Share to cairnfield" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head"><h2>Share to cairnfield</h2><button type="button" className="ghost" onClick={onCancel}>Close</button></div>
+        <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={request.kind === "text" ? "Shared note" : "Shared files"} /></label>
+        <label>Folder<select value={folderPath} onChange={(event) => setFolderPath(event.target.value)}>
+          <option value="/">/</option>
+          {folderOptions.map((folder) => <option key={folder.path} value={folder.path}>{folder.board ? `${folder.path} (board)` : folder.path}</option>)}
+        </select></label>
+        {request.kind === "text" ? <pre className="share-text-preview">{request.text.length > 600 ? `${request.text.slice(0, 600)}…` : request.text}</pre> : (
+          <div className="import-file-list">{request.files.map((file) => {
+            const key = `${file.name}-${file.size}`;
+            const thumb = thumbnails.get(key);
+            return <span key={key}>{thumb ? <img className="share-file-thumb" src={thumb} alt="" /> : <UploadSimpleIcon />}{file.name}<small className="muted">{formatBytes(file.size)}</small></span>;
+          })}</div>
+        )}
+        <div className="modal-actions">
+          <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
+          <button type="button" disabled={saving} onClick={() => { setSaving(true); void onSave(title, folderPath).finally(() => setSaving(false)); }}>
+            {request.kind === "text" ? <><ShareNetworkIcon />Save note</> : <><UploadSimpleIcon />Import</>}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -1679,16 +1819,46 @@ function DocumentNoteView({ asset }: { asset: DocumentAssetView }) {
   );
 }
 
+const folderDisplayModeIcons: Record<FolderDisplayMode, React.ReactNode> = {
+  list: <ListIcon />,
+  gallery: <SquaresFourIcon />,
+  moodboard: <ImageIcon />
+};
+
 function FolderViewControls({ mode, sortMode, moodboardDisabledReason, onModeChange, onSortChange }: { mode: FolderDisplayMode; sortMode: FolderSortMode; moodboardDisabledReason?: string; onModeChange: (mode: FolderDisplayMode) => void; onSortChange: (sortMode: FolderSortMode) => void }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const modeLabel = folderDisplayModes.find((option) => option.value === mode)?.label || "List";
   return (
     <div className="folder-view-controls" aria-label="Folder view settings">
-      <div className="segmented-control" aria-label="Display mode">
-        {folderDisplayModes.map((option) => {
-          const disabled = option.value === "moodboard" && Boolean(moodboardDisabledReason);
-          return <button key={option.value} type="button" className={mode === option.value ? "active" : ""} disabled={disabled} title={disabled ? moodboardDisabledReason : option.label} onClick={() => onModeChange(option.value)}>{option.label}</button>;
-        })}
+      <div className="view-mode-menu" ref={menuRef}>
+        <button type="button" className="secondary icon-only" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={`Display mode: ${modeLabel}`} title={`Display mode: ${modeLabel}`}>
+          {folderDisplayModeIcons[mode]}
+        </button>
+        {open ? (
+          <div className="view-mode-popover" role="menu">
+            {folderDisplayModes.map((option) => {
+              const disabled = option.value === "moodboard" && Boolean(moodboardDisabledReason);
+              const row = (
+                <button key={option.value} type="button" role="menuitemradio" aria-checked={mode === option.value} className={mode === option.value ? "active" : ""} disabled={disabled} onClick={() => { setOpen(false); onModeChange(option.value); }}>
+                  {folderDisplayModeIcons[option.value]}{option.label}
+                </button>
+              );
+              return disabled ? <span key={option.value} className="view-mode-disabled" title={moodboardDisabledReason}>{row}</span> : row;
+            })}
+          </div>
+        ) : null}
       </div>
-      {moodboardDisabledReason ? <span className="folder-view-note">{moodboardDisabledReason}</span> : null}
       <label className="sort-control">
         <span>Sort</span>
         <select value={sortMode} onChange={(event) => onSortChange(event.target.value as FolderSortMode)}>

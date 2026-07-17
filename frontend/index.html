@@ -24,23 +24,7 @@
       <style>
         body { margin: 0; }
         .boot-loading { min-height: 100vh; display: grid; place-items: center; background: #f2f0eb; }
-        .boot-stones { display: block; animation: boot-stones-idle 2.8s ease-in-out 1.7s infinite; }
-        .boot-stone { transform-box: fill-box; transform-origin: 50% 100%; animation: boot-stone-drop .7s cubic-bezier(.25, .7, .35, 1) both; }
-        .boot-stone.stone-middle { animation-delay: .45s; }
-        .boot-stone.stone-top { animation-delay: .9s; }
-        @keyframes boot-stone-drop {
-          0% { transform: translateY(-56px) rotate(0deg); opacity: 0; }
-          35% { transform: translateY(-22px) rotate(0deg); opacity: 1; }
-          55% { transform: translateY(0) rotate(0deg); opacity: 1; }
-          70% { transform: translateY(0) rotate(-4deg); }
-          83% { transform: translateY(0) rotate(2.5deg); }
-          93% { transform: translateY(0) rotate(-1deg); }
-          100% { transform: translateY(0) rotate(0deg); opacity: 1; }
-        }
-        @keyframes boot-stones-idle {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.04); opacity: .88; }
-        }
+        .boot-stones { display: block; }
       </style>
     </div>
     <script type="module" src="/src/main.tsx"></script>

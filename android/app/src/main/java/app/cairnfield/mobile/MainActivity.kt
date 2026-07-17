@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
     private var loadingAnimationView: CairnfieldLoadingView? = null
     private var loadingRevealGate: LoadingRevealGate? = null
     private var updatePromptPolicy = UpdatePromptPolicy()
+    private val cairnfieldShareStore by lazy { CairnfieldShareStore(applicationContext) }
     private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,6 +87,11 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         if (webView == null) {
             if (CairnfieldPrefs.serverUrl(this).isBlank()) showSetup() else showWeb(intent)
+        } else {
+            shareUrlForIntent(intent)?.let { target ->
+                webView?.loadUrl(target)
+                consumeShareIntent()
+            }
         }
     }
 
@@ -248,7 +254,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         loadingAnimation.onAnimationComplete = revealGate::markAnimationReady
-        enableServiceWorkers()
+        installShareServiceWorkerInterceptor(serverOrigin)
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
         view.settings.apply {
@@ -260,7 +266,7 @@ class MainActivity : ComponentActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             setSupportMultipleWindows(true)
         }
-        view.addJavascriptInterface(AndroidWebBridge(), "cairnfieldAndroid")
+        view.addJavascriptInterface(AndroidWebBridge(cairnfieldShareStore, serverOrigin), "cairnfieldAndroid")
         view.webViewClient = object : WebViewClient() {
             private var mainFrameCommitted = false
             private var failureHandled = false
@@ -282,6 +288,9 @@ class MainActivity : ComponentActivity() {
                 }
                 return handled
             }
+
+            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+                cairnfieldShareStore.intercept(request, serverOrigin) ?: super.shouldInterceptRequest(view, request)
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 mainNavigationGeneration += 1
@@ -365,14 +374,42 @@ class MainActivity : ComponentActivity() {
         setContentView(root)
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) checkForAppUpdate()
 
-        val restored = restoredState != null && view.restoreState(restoredState) != null
-        if (restored) view.reload() else view.loadUrl(urlForIntent())
+        val shareTarget = shareUrlForIntent(sourceIntent)
+        val restored = shareTarget == null && restoredState != null && view.restoreState(restoredState) != null
+        if (restored) view.reload() else view.loadUrl(shareTarget ?: urlForIntent())
         loadingAnimation.start(restoredLoadingElapsedMs)
+        if (shareTarget != null) consumeShareIntent()
     }
 
     private fun urlForIntent(): String {
         return CairnfieldPrefs.lastVisitedUrl(this).takeIf { it.isNotBlank() }
             ?: CairnfieldPrefs.buildUrl(this, "/")
+    }
+
+    private fun shareUrlForIntent(sourceIntent: Intent?): String? {
+        if (sourceIntent?.action != Intent.ACTION_SEND && sourceIntent?.action != Intent.ACTION_SEND_MULTIPLE) {
+            return null
+        }
+        if (CairnfieldPrefs.serverUrl(this).isBlank()) return null
+        cairnfieldShareStore.capture(sourceIntent)?.let { shareID ->
+            return shareTargetUrl("android_share" to shareID)
+        }
+        val text = sourceIntent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+        if (text.isBlank()) return null
+        val subject = sourceIntent.getStringExtra(Intent.EXTRA_SUBJECT).orEmpty()
+        return shareTargetUrl("share_text" to text, "share_subject" to subject)
+    }
+
+    private fun shareTargetUrl(vararg params: Pair<String, String>): String {
+        val builder = Uri.parse(CairnfieldPrefs.buildUrl(this, "/")).buildUpon()
+        params.forEach { (key, value) ->
+            if (value.isNotBlank()) builder.appendQueryParameter(key, value)
+        }
+        return builder.build().toString()
+    }
+
+    private fun consumeShareIntent() {
+        setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
     }
 
     private fun showConnectionFailure(failedView: WebView, message: String) {
@@ -478,12 +515,21 @@ class MainActivity : ComponentActivity() {
         val name = JSONObject.quote(BuildConfig.VERSION_NAME)
         val code = BuildConfig.VERSION_CODE
         view.evaluateJavascript(
-            "window.cairnfieldAndroid = {" +
+            "(function() {" +
+                "var bridge = window.cairnfieldAndroid || {};" +
+                "window.cairnfieldAndroid = {" +
                 "versionName: $name, " +
                 "versionCode: $code, " +
                 "getVersionName: function() { return $name; }, " +
-                "getVersionCode: function() { return $code; }" +
-                "};",
+                "getVersionCode: function() { return $code; }, " +
+                "getSharedFilesManifest: function(shareId) {" +
+                "return bridge.getSharedFilesManifest ? bridge.getSharedFilesManifest(shareId) : '';" +
+                "}, " +
+                "releaseShare: function(shareId) {" +
+                "if (bridge.releaseShare) bridge.releaseShare(shareId);" +
+                "}" +
+                "};" +
+                "})();",
             null
         )
     }
@@ -493,11 +539,14 @@ class MainActivity : ComponentActivity() {
         UpdateChecker.checkInForeground(this, force = true, shouldPrompt = updatePromptPolicy::shouldPrompt)
     }
 
-    private fun enableServiceWorkers() {
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_BASIC_USAGE)) return
-        // Installing a (pass-through) client opts the WebView into service worker support.
+    private fun installShareServiceWorkerInterceptor(serverOrigin: String) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_BASIC_USAGE) ||
+            !WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_SHOULD_INTERCEPT_REQUEST)
+        ) return
+        // Fetches owned by an active service worker bypass the page WebViewClient.
         ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(object : ServiceWorkerClientCompat() {
-            override fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? = null
+            override fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? =
+                cairnfieldShareStore.intercept(request, serverOrigin)
         })
     }
 

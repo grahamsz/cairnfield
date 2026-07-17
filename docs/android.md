@@ -37,8 +37,24 @@ prefilled.
   everything else in the external browser; `AndroidBackNavigation` maps the
   back button onto WebView history with a fallback to the app root.
 - A `cairnfieldAndroid` JavascriptInterface plus a `window.cairnfieldAndroid =
-  {versionName, versionCode}` injection in `onPageStarted` lets the web app
-  detect the native shell (used to hide the PWA install prompt).
+  {...}` injection in `onPageStarted` lets the web app detect the native shell
+  (used to hide the sidebar APK-download card inside the native app). Beside
+  the version accessors it exposes `getSharedFilesManifest(shareId)` /
+  `releaseShare(shareId)` for incoming shares (see below).
+
+### Share targets (ACTION_SEND)
+
+The app registers for `ACTION_SEND` / `ACTION_SEND_MULTIPLE` (`text/plain`,
+`text/html`, `image/*`, `application/pdf`). Text/link shares load
+`{server}/?share_text=…&share_subject=…`; file shares are captured into
+`CairnfieldShareStore` (in-memory sessions, 15-minute TTL, ported from
+rolltop's `NativeShareStore`) and the app loads
+`{server}/?android_share={sessionId}`. The web app fetches the manifest via
+the bridge and the bytes from same-origin
+`/cairnfield-native-share/{sessionId}/{token}` URLs, which
+`CairnfieldShareStore.intercept` serves through both the page's
+`WebViewClient.shouldInterceptRequest` and a `ServiceWorkerClient`
+(fetches owned by an active service worker bypass the page client).
 
 ### Loading animation
 
@@ -48,7 +64,8 @@ and rock side to side before settling** — the same animation the web app shows
 in its boot splash. The SVG path data from `logo.svg` is parsed with
 `PathParser.createPathFromPathData()`, the logo's `translate` offset baked in
 via a `Matrix`. A single 1.8s `ValueAnimator` drives the timeline: three
-staggered drops with an overshoot landing bounce, then two damped rock cycles
+staggered drops that decelerate into place from above (no overshoot — a stone
+never dips below its resting position), then two damped rock cycles
 of the whole cairn around its base; afterwards an infinite subtle pulse holds
 the settled logo until the page is ready. `LoadingRevealGate` (ported from
 rolltop) coordinates the crossfade from loading view to WebView. The launcher
