@@ -12,20 +12,23 @@ import java.net.URI
 internal object CairnfieldClipMode {
     const val MAX_CLIP_HTML_BYTES = 40 * 1024 * 1024
 
-    /** Origin the app serves its bundled SingleFile assets from inside the WebView. */
-    const val SINGLE_FILE_MODULE_URL =
-        "https://appassets.androidplatform.net/assets/single-file/single-file.js"
+    /** URL the app serves its bundled SingleFile script from inside the WebView. */
+    const val SINGLE_FILE_BUNDLE_URL =
+        "https://appassets.androidplatform.net/assets/single-file-bundle.js"
 
     /**
      * Runs the bundled SingleFile library against the rendered page and hands
      * the result to the native cairnfieldClipCallback JavascriptInterface as
-     * {"title","url","html"} (or {"error"}). Options mirror the extension's
+     * {"title","url","html"} (or {"error"}). The library is a single classic
+     * IIFE script (see android/build-singlefile.sh), injected with a plain
+     * script tag — no ES modules, no CORS, no dynamic import, so the load is
+     * guaranteed to settle via onload/onerror. Options mirror the extension's
      * full-page capture in extension/content-capture.js.
      */
     const val SINGLE_FILE_RUN_JS = """
 (function() {
-  import("$SINGLE_FILE_MODULE_URL").then(function(singleFile) {
-    return singleFile.getPageData({
+  function run() {
+    window.CFSingleFile.getPageData({
       blockScripts: true,
       removeHiddenElements: true,
       removeUnusedStyles: false,
@@ -41,13 +44,24 @@ internal object CairnfieldClipMode {
       insertMetaNoIndex: true,
       insertCanonicalLink: true,
       url: location.href
-    }, {}, document, window);
-  }).then(function(pageData) {
-    var html = typeof pageData.content === "string" ? pageData.content : new TextDecoder().decode(new Uint8Array(pageData.content));
-    window.cairnfieldClipCallback.done(JSON.stringify({ title: document.title, url: location.href, html: html }));
-  }).catch(function(err) {
-    window.cairnfieldClipCallback.done(JSON.stringify({ error: String(err) }));
-  });
+    }, {}, document, window).then(function(pageData) {
+      var html = typeof pageData.content === "string" ? pageData.content : new TextDecoder().decode(new Uint8Array(pageData.content));
+      window.cairnfieldClipCallback.done(JSON.stringify({ title: document.title, url: location.href, html: html }));
+    }).catch(function(err) {
+      window.cairnfieldClipCallback.done(JSON.stringify({ error: String(err) }));
+    });
+  }
+  if (window.CFSingleFile && typeof window.CFSingleFile.getPageData === "function") {
+    run();
+    return;
+  }
+  var script = document.createElement("script");
+  script.src = "$SINGLE_FILE_BUNDLE_URL";
+  script.onload = run;
+  script.onerror = function() {
+    window.cairnfieldClipCallback.done(JSON.stringify({ error: "could not load the capture library" }));
+  };
+  document.head.appendChild(script);
 })()
 """
 
