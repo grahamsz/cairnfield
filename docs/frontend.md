@@ -179,7 +179,11 @@ Android's share sheet (see [android.md](android.md#share-targets-action_send)):
   a title input, folder picker (moodboard folders marked "(board)"), and text
   preview; when the text contains a URL, a "Clip the full page" option
   (default on) saves via `POST /api/clip/url` — the server fetches and clips
-  the page (SSRF-guarded) instead of creating a bare link note.
+  the page (SSRF-guarded) instead of creating a bare link note. If the server
+  flags the clip with `clip_warning` (JS wall / login wall / thin content),
+  a follow-up dialog offers "Open in app to clip" (native shell only; hands
+  the URL to the Android in-app clip mode and trashes the partial note) or
+  "Keep partial clip".
 - `?android_share=<sessionId>` — shared files: the dialog loads the manifest
   through the bridge, downloads the bytes from same-origin
   `/cairnfield-native-share/<session>/<token>` URLs, previews them, and saves

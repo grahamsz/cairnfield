@@ -181,8 +181,17 @@ source-attribution markdown, stores the capture as an asset, and sets
 or fragments, hostnames resolved and every IP checked against
 loopback/private/link-local/multicast ranges — re-validated per redirect and
 enforced at dial time against DNS rebinding. 15s timeout, ≤5 redirects, 10 MB
-cap. Used by the Android share flow when a shared URL should become a full
-page clip instead of a bare link.
+cap. Its success response adds `clip_warning` when the page almost certainly
+did not clip usefully: `javascript_required` (JS walls/bot checks),
+`login_required` (subscribe/sign-in walls), or `thin_content` (near-empty
+extraction) — heuristics over the extracted text and wall markers; the note
+is still created and the client decides what to do (see the in-app clip
+fallback below). Used by the Android share flow when a shared URL should
+become a full page clip instead of a bare link.
+
+`clip/html` accepts **session or bearer** auth so the Android app's in-app
+clip can upload rendered pages with the WebView's session cookie; the other
+clip endpoints stay bearer-only.
 
 ## Import and export
 

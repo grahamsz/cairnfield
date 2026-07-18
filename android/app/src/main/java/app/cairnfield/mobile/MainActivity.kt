@@ -816,6 +816,10 @@ class MainActivity : ComponentActivity() {
         private const val STATE_WEB_VIEW = "cairnfield.web_view_state"
         private const val STATE_PROMPTED_UPDATE_NAME = "cairnfield.prompted_update_name"
         private const val STATE_LOADING_ANIMATION_ELAPSED_MS = "cairnfield.loading_animation_elapsed_ms"
+        private const val STATE_CLIP_MODE = "cairnfield.clip_mode"
+        private const val STATE_CLIP_URL = "cairnfield.clip_url"
+        private const val STATE_CLIP_FOLDER = "cairnfield.clip_folder"
+        private const val STATE_CLIP_TITLE = "cairnfield.clip_title"
         private const val LOADING_CROSSFADE_MS = 160L
         private val SHELL_BACKGROUND = Color.rgb(242, 240, 235)
     }

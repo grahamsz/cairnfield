@@ -59,6 +59,23 @@ the bridge and the bytes from same-origin
 `WebViewClient.shouldInterceptRequest` and a `ServiceWorkerClient`
 (fetches owned by an active service worker bypass the page client).
 
+### In-app clip mode
+
+Server-side clipping (`POST /api/clip/url`) fetches pages with a plain HTTP
+client, so it cannot capture pages that need JavaScript or a site login (bot
+checks, paywalls). When the web app reports such a page, it can hand the URL
+back to the app via `cairnfieldAndroid.clipInApp(url, folderPath, title)`:
+MainActivity loads the URL **in the app's WebView** — real JS engine and a
+persistent cookie store, so a newspaper login done once in the app sticks —
+with a bottom "Clip this page / Cancel" bar. Same-site navigations (login
+flows, JS challenges) stay inside while clip mode is active; the back button
+and Cancel exit. Clipping runs an injected serializer (cleaned DOM clone:
+scripts and active attributes stripped, URLs absolutized, `<base>` inserted)
+and uploads the result multipart to `/api/clip/html` with the session cookie
+from `CookieManager`, then opens the created note. Pure logic (navigation
+rule, metadata, serializer, response parsing) lives in
+`CairnfieldClipMode.kt` with JVM tests.
+
 ### Loading animation
 
 `CairnfieldLoadingView` is a custom `View` that renders the cairnfield logo as
