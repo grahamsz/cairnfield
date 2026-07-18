@@ -585,7 +585,10 @@ class MainActivity : ComponentActivity() {
             return
         }
         val endpoint = CairnfieldPrefs.buildUrl(this, "/api/clip/html")
-        val cookie = CookieManager.getInstance().getCookie(serverUrl).orEmpty()
+        // Look up cookies for the full endpoint URL: the session cookie's path
+        // is the app base path (e.g. /notes/), which does not prefix-match the
+        // bare server URL, so getCookie(serverUrl) would return nothing.
+        val cookie = CookieManager.getInstance().getCookie(endpoint).orEmpty()
         val metadata = CairnfieldClipMode.metadataJson(
             title = clipTitle.ifBlank { snapshot.title },
             pageUrl = snapshot.url.ifBlank { clipUrl },
