@@ -17,6 +17,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.SslErrorHandler
 import android.webkit.URLUtil
 import android.webkit.WebResourceError
@@ -61,7 +62,9 @@ class MainActivity : ComponentActivity() {
     private var clipFolderPath = ""
     private var clipTitle = ""
     private var clipBar: View? = null
+    private var clipCallbackInterface: Any? = null
     private val cairnfieldShareStore by lazy { CairnfieldShareStore(applicationContext) }
+    private val appAssetLoader by lazy { CairnfieldAssetServer.buildLoader(applicationContext) }
     private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -325,7 +328,9 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-                cairnfieldShareStore.intercept(request, serverOrigin) ?: super.shouldInterceptRequest(view, request)
+                cairnfieldShareStore.intercept(request, serverOrigin)
+                    ?: appAssetLoader.shouldInterceptRequest(request.url)
+                    ?: super.shouldInterceptRequest(view, request)
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 mainNavigationGeneration += 1
@@ -515,6 +520,7 @@ class MainActivity : ComponentActivity() {
         clipUrl = ""
         clipFolderPath = ""
         clipTitle = ""
+        cancelClipWatchdog()
         dismissClipBar()
         if (loadAppHome) webView?.loadUrl(CairnfieldPrefs.buildUrl(this, "/"))
     }
@@ -557,9 +563,60 @@ class MainActivity : ComponentActivity() {
         clipBar = null
     }
 
+    private var clipWatchdog: Runnable? = null
+
     private fun clipCurrentPage(clipButton: Button) {
         val view = webView ?: return
         clipButton.isEnabled = false
+        // Prefer the bundled SingleFile library for a self-contained capture
+        // (CSS and images inlined); fall back to the naive DOM snapshot if the
+        // module cannot load or the pipeline errors.
+        val callback = object {
+            @JavascriptInterface
+            fun done(resultJson: String) {
+                cancelClipWatchdog()
+                view.post { handleClipSnapshot(CairnfieldClipMode.parsePageSnapshot(resultJson), clipButton) }
+            }
+        }
+        clipCallbackInterface = callback
+        view.addJavascriptInterface(callback, "cairnfieldClipCallback")
+        view.evaluateJavascript(CairnfieldClipMode.SINGLE_FILE_RUN_JS, null)
+        val watchdog = Runnable {
+            if (clipCallbackInterface === callback) {
+                cancelClipWatchdog()
+                runNaiveClipSnapshot(clipButton)
+            }
+        }
+        clipWatchdog = watchdog
+        view.postDelayed(watchdog, CLIP_SINGLEFILE_TIMEOUT_MS)
+    }
+
+    private fun cancelClipWatchdog() {
+        clipWatchdog?.let { webView?.removeCallbacks(it) }
+        clipWatchdog = null
+        if (clipCallbackInterface != null) {
+            webView?.removeJavascriptInterface("cairnfieldClipCallback")
+            clipCallbackInterface = null
+        }
+    }
+
+    private fun handleClipSnapshot(snapshot: ClipPageSnapshot?, clipButton: Button) {
+        if (isFinishing || isDestroyed) return
+        if (snapshot == null) {
+            runNaiveClipSnapshot(clipButton)
+            return
+        }
+        val htmlBytes = snapshot.html.toByteArray(Charsets.UTF_8)
+        if (htmlBytes.size > CairnfieldClipMode.MAX_CLIP_HTML_BYTES) {
+            clipButton.isEnabled = true
+            Toast.makeText(this, "Page too large to clip.", Toast.LENGTH_LONG).show()
+            return
+        }
+        uploadClip(snapshot, htmlBytes, clipButton)
+    }
+
+    private fun runNaiveClipSnapshot(clipButton: Button) {
+        val view = webView ?: return
         view.evaluateJavascript(CairnfieldClipMode.SERIALIZER_JS) { result ->
             if (isFinishing || isDestroyed) return@evaluateJavascript
             val snapshot = result?.let(CairnfieldClipMode::parsePageSnapshot)
@@ -826,6 +883,7 @@ class MainActivity : ComponentActivity() {
         private const val STATE_CLIP_URL = "cairnfield.clip_url"
         private const val STATE_CLIP_FOLDER = "cairnfield.clip_folder"
         private const val STATE_CLIP_TITLE = "cairnfield.clip_title"
+        private const val CLIP_SINGLEFILE_TIMEOUT_MS = 45_000L
         private const val LOADING_CROSSFADE_MS = 160L
         private val SHELL_BACKGROUND = Color.rgb(242, 240, 235)
     }

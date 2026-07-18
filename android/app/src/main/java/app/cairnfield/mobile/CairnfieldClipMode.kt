@@ -12,12 +12,50 @@ import java.net.URI
 internal object CairnfieldClipMode {
     const val MAX_CLIP_HTML_BYTES = 40 * 1024 * 1024
 
+    /** Origin the app serves its bundled SingleFile assets from inside the WebView. */
+    const val SINGLE_FILE_MODULE_URL =
+        "https://appassets.androidplatform.net/assets/single-file/single-file.js"
+
     /**
-     * JavaScript evaluated against the rendered page in clip mode. Returns a
-     * JSON string {"title", "url", "html"} where html is a doctype-prefixed
-     * snapshot of a cleaned DOM clone: script-like elements and active
-     * attributes stripped, href/src/poster absolutized, and a <base> tag
-     * pointing at the final page URL inserted first in <head>.
+     * Runs the bundled SingleFile library against the rendered page and hands
+     * the result to the native cairnfieldClipCallback JavascriptInterface as
+     * {"title","url","html"} (or {"error"}). Options mirror the extension's
+     * full-page capture in extension/content-capture.js.
+     */
+    const val SINGLE_FILE_RUN_JS = """
+(function() {
+  import("$SINGLE_FILE_MODULE_URL").then(function(singleFile) {
+    return singleFile.getPageData({
+      blockScripts: true,
+      removeHiddenElements: true,
+      removeUnusedStyles: false,
+      removeUnusedFonts: false,
+      removeScripts: true,
+      removeFrames: true,
+      loadDeferredImages: true,
+      networkTimeout: 8000,
+      maxResourceSizeEnabled: true,
+      maxResourceSize: 16,
+      compressHTML: false,
+      insertMetaCSP: false,
+      insertMetaNoIndex: true,
+      insertCanonicalLink: true,
+      url: location.href
+    }, {}, document, window);
+  }).then(function(pageData) {
+    var html = typeof pageData.content === "string" ? pageData.content : new TextDecoder().decode(new Uint8Array(pageData.content));
+    window.cairnfieldClipCallback.done(JSON.stringify({ title: document.title, url: location.href, html: html }));
+  }).catch(function(err) {
+    window.cairnfieldClipCallback.done(JSON.stringify({ error: String(err) }));
+  });
+})()
+"""
+
+    /**
+     * JavaScript fallback for pages where the SingleFile pipeline fails: a
+     * naive snapshot returning {"title", "url", "html"} where html is a
+     * doctype-prefixed cleaned DOM clone (scripts stripped, URLs absolutized,
+     * <base> inserted).
      */
     const val SERIALIZER_JS = """
 (function() {

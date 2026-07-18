@@ -69,11 +69,16 @@ MainActivity loads the URL **in the app's WebView** — real JS engine and a
 persistent cookie store, so a newspaper login done once in the app sticks —
 with a bottom "Clip this page / Cancel" bar. Same-site navigations (login
 flows, JS challenges) stay inside while clip mode is active; the back button
-and Cancel exit. Clipping runs an injected serializer (cleaned DOM clone:
-scripts and active attributes stripped, URLs absolutized, `<base>` inserted)
-and uploads the result multipart to `/api/clip/html` with the session cookie
-from `CookieManager`, then opens the created note. Pure logic (navigation
-rule, metadata, serializer, response parsing) lives in
+and Cancel exit. Clipping runs the **vendored SingleFile library** (copied
+from `extension/single-file/` into `android/app/src/main/assets/single-file/`,
+served to the page via `WebViewAssetLoader` with CORS headers so a dynamic
+`import()` works from any page origin): the same engine the browser extension
+uses, so CSS, images, and fonts are inlined into one self-contained HTML file
+that renders correctly under the served-asset sandbox CSP. The result is
+uploaded multipart to `/api/clip/html` with the session cookie from
+`CookieManager`, then the app opens the created note. If the module fails to
+load or errors, a naive cleaned-DOM serializer is the fallback. Pure logic
+(navigation rule, metadata, serializer strings, response parsing) lives in
 `CairnfieldClipMode.kt` with JVM tests.
 
 ### Loading animation
