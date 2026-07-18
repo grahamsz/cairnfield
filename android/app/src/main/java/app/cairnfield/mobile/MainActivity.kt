@@ -736,6 +736,9 @@ class MainActivity : ComponentActivity() {
                 "}, " +
                 "releaseShare: function(shareId) {" +
                 "if (bridge.releaseShare) bridge.releaseShare(shareId);" +
+                "}, " +
+                "clipInApp: function(url, folderPath, title) {" +
+                "if (bridge.clipInApp) bridge.clipInApp(url, folderPath, title);" +
                 "}" +
                 "};" +
                 "})();",
