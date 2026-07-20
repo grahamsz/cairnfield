@@ -660,7 +660,7 @@ class MainActivity : ComponentActivity() {
                     onSuccess = { slug ->
                         if (slug.isNullOrBlank()) {
                             clipButton.isEnabled = true
-                            Toast.makeText(this, "Clip failed: unexpected server response.", Toast.LENGTH_LONG).show()
+                            Toast.makeText(this, "Clip failed: the server response had no note to open.", Toast.LENGTH_LONG).show()
                         } else {
                             exitClipMode(loadAppHome = false)
                             webView?.loadUrl(CairnfieldPrefs.buildUrl(this, "/notes/$slug/x"))
@@ -668,9 +668,10 @@ class MainActivity : ComponentActivity() {
                     },
                     onFailure = { error ->
                         clipButton.isEnabled = true
+                        val detail = error.message?.takeIf { it.isNotBlank() } ?: "could not reach the server."
                         Toast.makeText(
                             this,
-                            "Clip failed: ${error.message ?: "could not reach the server."}",
+                            "Clip failed: $detail",
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -718,7 +719,7 @@ class MainActivity : ComponentActivity() {
             val status = connection.responseCode
             val body = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (status !in 200..299) throw IOException("HTTP $status")
+            if (status !in 200..299) throw IOException("HTTP $status: ${body.take(300).ifBlank { "no response body" }}")
             return CairnfieldClipMode.parseClipSlug(body)
         } finally {
             connection.disconnect()
