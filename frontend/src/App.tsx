@@ -956,6 +956,18 @@ export default function App() {
       const noteTitle = title.trim() || request.subject.trim() || "Shared note";
       const url = clipPage ? firstURL(request.text) : "";
       if (url) {
+        // In the native app, clip from the rendered page on the device: it
+        // runs JavaScript, keeps site logins, and is not subject to the
+        // server-side fetch's private-IP restrictions (a server cannot clip
+        // pages hosted on its own network). Server-side clipping stays the
+        // desktop/extension path.
+        const bridge = (window as any).cairnfieldAndroid;
+        if (isNativeAndroid() && typeof bridge?.clipInApp === "function") {
+          setShareRequest(null);
+          bridge.clipInApp(url, targetFolder, title.trim() || request.subject.trim());
+          addToast("Opening the page in the app — clip it from there.");
+          return;
+        }
         const body: { url: string; folder_path: string; title?: string } = { url, folder_path: targetFolder };
         const overrideTitle = title.trim() || request.subject.trim();
         if (overrideTitle) body.title = overrideTitle;

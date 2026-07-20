@@ -185,9 +185,11 @@ cap. Its success response adds `clip_warning` when the page almost certainly
 did not clip usefully: `javascript_required` (JS walls/bot checks),
 `login_required` (subscribe/sign-in walls), or `thin_content` (near-empty
 extraction) — heuristics over the extracted text and wall markers; the note
-is still created and the client decides what to do (see the in-app clip
-fallback below). Used by the Android share flow when a shared URL should
-become a full page clip instead of a bare link.
+is still created and the client decides what to do. `clip/url` is the
+**desktop/extension path**: the Android app defaults to its in-app clip mode
+below, which renders pages on the device and is unaffected by the SSRF
+restrictions (so pages hosted on the server's own network, which the guard
+refuses, still clip fine on the device).
 
 `clip/html` accepts **session or bearer** auth so the Android app's in-app
 clip can upload rendered pages with the WebView's session cookie; the other
