@@ -75,15 +75,15 @@ as a single classic IIFE script (`android/build-singlefile.sh` wraps
 `android/app/src/main/assets/single-file-bundle.js`): the same engine the
 browser extension uses, so CSS, images, and fonts are inlined into one
 self-contained HTML file that renders correctly under the served-asset
-sandbox CSP. The script is injected with a plain `<script>` tag served via
-`WebViewAssetLoader` — no ES modules, no CORS, no dynamic `import()`, so the
-load always settles (the earlier module-graph approach could stall in the
-WebView). The result is uploaded multipart to `/api/clip/html` with the
+sandbox CSP. The bundle source is injected via `evaluateJavascript` (page CSP
+would block a `<script>` tag from another origin on strict sites), and the
+result returns through a `JavascriptInterface` registered at WebView creation
+— registering one mid-session would not reach an already-loaded page on many
+WebView builds. Upload is multipart to `/api/clip/html` with the
 session cookie from `CookieManager`, then the app opens the created note. If
-the bundle fails to load, the pipeline errors, or 45s pass without a result,
-a naive cleaned-DOM serializer is the fallback. Pure logic (navigation rule,
-metadata, serializer strings, response parsing) lives in
-`CairnfieldClipMode.kt` with JVM tests.
+the pipeline errors or 45s pass without a result, a naive cleaned-DOM
+serializer is the fallback. Pure logic (navigation rule, metadata, serializer
+strings, response parsing) lives in `CairnfieldClipMode.kt` with JVM tests.
 
 ### Loading animation
 

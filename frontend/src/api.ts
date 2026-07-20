@@ -18,11 +18,14 @@ async function parse<T>(res: Response): Promise<T> {
     try {
       data = JSON.parse(text);
     } catch {
-      if (!res.ok) throw new ApiError(res.status, text || res.statusText);
+      if (!res.ok) throw new ApiError(res.status, text || res.statusText || `Request failed (HTTP ${res.status})`);
       throw new Error("Invalid JSON");
     }
   }
-  if (!res.ok) throw new ApiError(res.status, typeof data.error === "string" ? data.error : res.statusText);
+  if (!res.ok) {
+    const detail = typeof data.error === "string" && data.error ? data.error : res.statusText;
+    throw new ApiError(res.status, detail || `Request failed (HTTP ${res.status})`);
+  }
   return data as T;
 }
 

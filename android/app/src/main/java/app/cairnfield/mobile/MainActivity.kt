@@ -62,7 +62,7 @@ class MainActivity : ComponentActivity() {
     private var clipFolderPath = ""
     private var clipTitle = ""
     private var clipBar: View? = null
-    private var clipCallbackInterface: Any? = null
+    private var clipResultBridge: ClipResultBridge? = null
     private val cairnfieldShareStore by lazy { CairnfieldShareStore(applicationContext) }
     private val appAssetLoader by lazy { CairnfieldAssetServer.buildLoader(applicationContext) }
     private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -298,6 +298,12 @@ class MainActivity : ComponentActivity() {
             },
             "cairnfieldAndroid"
         )
+        // Registered up front so the interface is present on any page clip
+        // mode navigates to; adding an interface mid-session would not reach
+        // an already-loaded page on many WebView builds.
+        val clipBridge = ClipResultBridge()
+        clipResultBridge = clipBridge
+        view.addJavascriptInterface(clipBridge, "cairnfieldClipCallback")
         view.webViewClient = object : WebViewClient() {
             private var mainFrameCommitted = false
             private var failureHandled = false
@@ -563,27 +569,45 @@ class MainActivity : ComponentActivity() {
         clipBar = null
     }
 
+    private var clipBundleSource: String? = null
+
+    /** The SingleFile IIFE bundle, read once from assets for direct injection. */
+    private fun singleFileBundleSource(): String {
+        clipBundleSource?.let { return it }
+        val source = try {
+            assets.open("single-file-bundle.js").bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } catch (_: Exception) {
+            ""
+        }
+        clipBundleSource = source
+        return source
+    }
+
     private var clipWatchdog: Runnable? = null
 
     private fun clipCurrentPage(clipButton: Button) {
         val view = webView ?: return
+        val bridge = clipResultBridge
+        if (bridge == null) {
+            Toast.makeText(this, "Clip failed: the capture bridge is unavailable.", Toast.LENGTH_LONG).show()
+            return
+        }
         clipButton.isEnabled = false
+        clipButton.text = "Capturing…"
         // Prefer the bundled SingleFile library for a self-contained capture
         // (CSS and images inlined); fall back to the naive DOM snapshot if the
-        // module cannot load or the pipeline errors.
-        val callback = object {
-            @JavascriptInterface
-            fun done(resultJson: String) {
-                cancelClipWatchdog()
-                view.post { handleClipSnapshot(CairnfieldClipMode.parsePageSnapshot(resultJson), clipButton) }
-            }
+        // module cannot load or the pipeline errors. The bundle source is
+        // injected directly because strict page CSP would block a script tag.
+        bridge.listener = { resultJson ->
+            cancelClipWatchdog()
+            view.post { handleClipSnapshot(CairnfieldClipMode.parsePageSnapshot(resultJson), clipButton) }
         }
-        clipCallbackInterface = callback
-        view.addJavascriptInterface(callback, "cairnfieldClipCallback")
+        view.evaluateJavascript(singleFileBundleSource(), null)
         view.evaluateJavascript(CairnfieldClipMode.SINGLE_FILE_RUN_JS, null)
         val watchdog = Runnable {
-            if (clipCallbackInterface === callback) {
+            if (bridge.listener != null) {
                 cancelClipWatchdog()
+                Toast.makeText(this, "Full-page capture timed out; using simple capture.", Toast.LENGTH_SHORT).show()
                 runNaiveClipSnapshot(clipButton)
             }
         }
@@ -594,22 +618,21 @@ class MainActivity : ComponentActivity() {
     private fun cancelClipWatchdog() {
         clipWatchdog?.let { webView?.removeCallbacks(it) }
         clipWatchdog = null
-        if (clipCallbackInterface != null) {
-            webView?.removeJavascriptInterface("cairnfieldClipCallback")
-            clipCallbackInterface = null
-        }
+        clipResultBridge?.listener = null
     }
 
     private fun handleClipSnapshot(snapshot: ClipPageSnapshot?, clipButton: Button) {
         if (isFinishing || isDestroyed) return
         if (snapshot == null) {
+            Toast.makeText(this, "Full-page capture unavailable; using simple capture.", Toast.LENGTH_SHORT).show()
             runNaiveClipSnapshot(clipButton)
             return
         }
         val htmlBytes = snapshot.html.toByteArray(Charsets.UTF_8)
         if (htmlBytes.size > CairnfieldClipMode.MAX_CLIP_HTML_BYTES) {
             clipButton.isEnabled = true
-            Toast.makeText(this, "Page too large to clip.", Toast.LENGTH_LONG).show()
+            clipButton.text = "Clip"
+            Toast.makeText(this, "Page too large to clip (${htmlBytes.size / (1024 * 1024)} MB).", Toast.LENGTH_LONG).show()
             return
         }
         uploadClip(snapshot, htmlBytes, clipButton)
@@ -622,13 +645,15 @@ class MainActivity : ComponentActivity() {
             val snapshot = result?.let(CairnfieldClipMode::parsePageSnapshot)
             if (snapshot == null) {
                 clipButton.isEnabled = true
+                clipButton.text = "Clip"
                 Toast.makeText(this, "Clip failed: could not read this page.", Toast.LENGTH_LONG).show()
                 return@evaluateJavascript
             }
             val htmlBytes = snapshot.html.toByteArray(Charsets.UTF_8)
             if (htmlBytes.size > CairnfieldClipMode.MAX_CLIP_HTML_BYTES) {
                 clipButton.isEnabled = true
-                Toast.makeText(this, "Page too large to clip.", Toast.LENGTH_LONG).show()
+                clipButton.text = "Clip"
+                Toast.makeText(this, "Page too large to clip (${htmlBytes.size / (1024 * 1024)} MB).", Toast.LENGTH_LONG).show()
                 return@evaluateJavascript
             }
             uploadClip(snapshot, htmlBytes, clipButton)
@@ -639,8 +664,10 @@ class MainActivity : ComponentActivity() {
         val serverUrl = CairnfieldPrefs.serverUrl(this)
         if (serverUrl.isBlank()) {
             clipButton.isEnabled = true
+            clipButton.text = "Clip"
             return
         }
+        clipButton.text = "Saving…"
         val endpoint = CairnfieldPrefs.buildUrl(this, "/api/clip/html")
         // Look up cookies for the full endpoint URL: the session cookie's path
         // is the app base path (e.g. /notes/), which does not prefix-match the
@@ -660,6 +687,7 @@ class MainActivity : ComponentActivity() {
                     onSuccess = { slug ->
                         if (slug.isNullOrBlank()) {
                             clipButton.isEnabled = true
+                            clipButton.text = "Clip"
                             Toast.makeText(this, "Clip failed: the server response had no note to open.", Toast.LENGTH_LONG).show()
                         } else {
                             exitClipMode(loadAppHome = false)
@@ -668,6 +696,7 @@ class MainActivity : ComponentActivity() {
                     },
                     onFailure = { error ->
                         clipButton.isEnabled = true
+                        clipButton.text = "Clip"
                         val detail = error.message?.takeIf { it.isNotBlank() } ?: "could not reach the server."
                         Toast.makeText(
                             this,
@@ -887,5 +916,21 @@ class MainActivity : ComponentActivity() {
         private const val CLIP_SINGLEFILE_TIMEOUT_MS = 45_000L
         private const val LOADING_CROSSFADE_MS = 160L
         private val SHELL_BACKGROUND = Color.rgb(242, 240, 235)
+    }
+}
+
+/**
+ * Bridge the in-app clip serializer calls with its result JSON. Registered
+ * with the WebView at creation time (mid-session registrations do not reach
+ * already-loaded pages on many WebView builds); the current clip attempt
+ * installs its listener and clears it when done.
+ */
+internal class ClipResultBridge {
+    @Volatile
+    var listener: ((String) -> Unit)? = null
+
+    @JavascriptInterface
+    fun done(resultJson: String) {
+        listener?.invoke(resultJson)
     }
 }
